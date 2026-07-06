@@ -2,10 +2,11 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-bot-panel}"
-SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.5}"
+SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.7}"
 SCRIPT_VERSION_STATUS_CACHE=""
 RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 AGENT_URL="${BOT_PANEL_AGENT_URL:-${RAW_BASE_URL}/bot_agent.py}"
+AGENT_FALLBACK_URL="${BOT_PANEL_AGENT_FALLBACK_URL:-https://cdn.jsdelivr.net/gh/wuyou18075/vps-bot@main/bot_agent.py}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.env}"
 STATE_DIR="${STATE_DIR:-/var/lib/${PANEL_NAME}}"
@@ -33,7 +34,7 @@ require_root() {
 
   if [ "$(id -u)" -ne 0 ]; then
     red "请使用 root 运行：sudo bash bot.sh"
-    red "一键安装：bash <(curl -fsSL -H \"Cache-Control: no-cache, no-store, must-revalidate\" -H \"Pragma: no-cache\" -H \"Expires: 0\" \"${RAW_BASE_URL}/bot.sh?t=\$(date +%s)\")"
+    red "一键安装：bash <(curl -fsSL -H \"Cache-Control: no-cache, no-store, must-revalidate\" -H \"Pragma: no-cache\" -H \"Expires: 0\" \"${RAW_BASE_URL}/bot.sh\")"
     exit 1
   fi
 }
@@ -45,24 +46,36 @@ pause() {
 download_file() {
   local url="$1"
   local target="$2"
+  shift 2
+  local urls=("${url}" "$@")
+  local candidate
   local temp_file
-  temp_file="$(mktemp)"
 
-  if ! curl -fsSL \
-    --connect-timeout 15 \
-    --retry 3 \
-    --retry-delay 2 \
-    -H "Cache-Control: no-cache, no-store, must-revalidate" \
-    -H "Pragma: no-cache" \
-    -H "Expires: 0" \
-    "${url}" \
-    -o "${temp_file}"; then
+  for candidate in "${urls[@]}"; do
+    temp_file="$(mktemp)"
+    if curl -fsSL \
+      --connect-timeout 15 \
+      --retry 1 \
+      --retry-delay 2 \
+      -H "Cache-Control: no-cache, no-store, must-revalidate" \
+      -H "Pragma: no-cache" \
+      -H "Expires: 0" \
+      "${candidate}" \
+      -o "${temp_file}"; then
+      mv "${temp_file}" "${target}"
+      return
+    fi
+
     rm -f "${temp_file}"
-    red "下载失败：${url}"
-    exit 1
-  fi
+    yellow "下载失败，尝试下一个地址：${candidate}"
+  done
 
-  mv "${temp_file}" "${target}"
+  red "下载失败：${urls[*]}"
+  exit 1
+}
+
+get_agent_download_urls() {
+  printf "%s\n" "${AGENT_URL}" "${AGENT_FALLBACK_URL}"
 }
 
 load_config() {
@@ -108,7 +121,7 @@ get_latest_script_version() {
       -H "Cache-Control: no-cache, no-store, must-revalidate" \
       -H "Pragma: no-cache" \
       -H "Expires: 0" \
-      "${RAW_BASE_URL}/bot.sh?t=$(date +%s)" 2>/dev/null)"; then
+      "${RAW_BASE_URL}/bot.sh" 2>/dev/null)"; then
     return 1
   fi
 
@@ -391,7 +404,7 @@ install_agent_file() {
     cp "${source_agent}" "${AGENT_FILE}"
   else
     yellow "未找到本地 bot_agent.py，正在从远端下载..."
-    download_file "${AGENT_URL}?t=$(date +%s)" "${AGENT_FILE}"
+    download_file "${AGENT_URL}" "${AGENT_FILE}" "${AGENT_FALLBACK_URL}"
   fi
 
   chmod 755 "${AGENT_FILE}"

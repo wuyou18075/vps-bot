@@ -26,6 +26,18 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
       self.run_bash(script),
     )
 
+  def test_remote_urls_do_not_append_timestamp_query(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      printf '%s\\n' "${RAW_BASE_URL}/bot.sh"
+      printf '%s\\n' "${AGENT_URL}"
+      printf '%s\\n' "${AGENT_FALLBACK_URL}"
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertNotIn("?t=", output)
+
   def test_single_interface_is_selected_automatically(self):
     script = textwrap.dedent("""
       BOT_PANEL_TESTING=1 source ./bot.sh
@@ -127,6 +139,40 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     self.assertIn("Cache-Control: no-cache, no-store, must-revalidate", output)
     self.assertIn("Pragma: no-cache", output)
     self.assertIn("Expires: 0", output)
+
+  def test_download_file_falls_back_to_second_url(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      mktemp() { printf '%s\\n' /tmp/bot-panel-download-test; }
+      curl() {
+        printf '%s\\n' "$*"
+        case "$*" in
+          *primary*) return 22 ;;
+          *fallback*) printf '%s\\n' ok > /tmp/bot-panel-download-test ;;
+        esac
+      }
+      mv() { :; }
+      download_file https://example.com/primary.py /tmp/target https://example.com/fallback.py
+      rm -f /tmp/bot-panel-download-test
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("https://example.com/primary.py", output)
+    self.assertIn("https://example.com/fallback.py", output)
+
+  def test_agent_download_urls_include_cdn_fallback(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      AGENT_URL=https://raw.example.com/bot_agent.py
+      AGENT_FALLBACK_URL=https://cdn.example.com/bot_agent.py
+      get_agent_download_urls
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("https://raw.example.com/bot_agent.py", output)
+    self.assertIn("https://cdn.example.com/bot_agent.py", output)
 
   def test_script_version_status_marks_latest(self):
     script = textwrap.dedent("""
