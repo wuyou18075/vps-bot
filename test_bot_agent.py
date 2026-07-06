@@ -58,6 +58,18 @@ class TelegramCommandTest(unittest.TestCase):
 
     self.assertEqual("[vps-1] Ping 结果\n1.1.1.1: avg 10 ms", result)
 
+  def test_numeric_shortcut_one_returns_status(self):
+    with mock.patch("bot_agent.build_report", return_value="[vps-1] 状态"):
+      result = bot_agent.handle_command({"NODE_NAME": "vps-1"}, "/1")
+
+    self.assertEqual("[vps-1] 状态", result)
+
+  def test_numeric_shortcut_two_returns_report(self):
+    with mock.patch("bot_agent.build_report", return_value="[vps-1] 流量汇报"):
+      result = bot_agent.handle_command({"NODE_NAME": "vps-1"}, "/2")
+
+    self.assertEqual("[vps-1] 流量汇报", result)
+
 
 if __name__ == "__main__":
   unittest.main()

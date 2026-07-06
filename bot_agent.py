@@ -318,9 +318,9 @@ def handle_command(config, text):
     return f"[{node_name}] Ping 结果\n{run_ping(args)}"
   if command in ["speed", "sudu"]:
     return f"[{node_name}] 测速结果\n{run_speedtest()}"
-  if command == "status":
+  if command in ["status", "1"]:
     return build_report(config, "状态")
-  if command == "report":
+  if command in ["report", "2"]:
     return build_report(config, "流量汇报")
   if command == "nodes":
     public_ip = get_public_ip()
@@ -333,6 +333,8 @@ def handle_command(config, text):
       "/sudu [节点名|all]",
       "/status [节点名|all]",
       "/report [节点名|all]",
+      "/1 状态快捷指令",
+      "/2 流量快捷指令",
       "/nodes",
     ])
   return None

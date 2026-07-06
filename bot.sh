@@ -31,7 +31,7 @@ require_root() {
 
   if [ "$(id -u)" -ne 0 ]; then
     red "请使用 root 运行：sudo bash bot.sh"
-    red "一键安装：bash <(curl -fsSL -H \"Cache-Control: no-cache\" \"https://raw.githubusercontent.com/xiangling18/vps-bot/refs/heads/main/bot.sh?t=\$RANDOM\")"
+    red "一键安装：bash <(curl -fsSL -H \"Cache-Control: no-cache\" \"${RAW_BASE_URL}/bot.sh?t=\$RANDOM\")"
     exit 1
   fi
 }
@@ -147,6 +147,90 @@ select_monitor_interface() {
     fi
     red "无效序号，请输入 1-${#interfaces[@]}。" >&2
   done
+}
+
+parse_vnstat_used_gb() {
+  python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+if isinstance(data.get("interfaces"), list) and data["interfaces"]:
+  months = data["interfaces"][0].get("traffic", {}).get("month", [])
+else:
+  months = data.get("traffic", {}).get("month", [])
+
+current = months[-1] if months else {}
+used = int(current.get("rx", 0)) + int(current.get("tx", 0))
+print(f"{used / 1024 / 1024 / 1024:.2f}G")
+'
+}
+
+get_traffic_summary() {
+  local total="${TOTAL_TRAFFIC_GB:-}"
+  local interface="${INTERFACE:-}"
+  local used="未知"
+  local output
+
+  if [ "${TRAFFIC_MONITOR:-0}" != "1" ]; then
+    printf "未开启\n"
+    return
+  fi
+
+  if [ -z "${total}" ]; then
+    total="未设置"
+  else
+    total="${total}G"
+  fi
+
+  if [ -z "${interface}" ]; then
+    interface="$(detect_interface)"
+  fi
+
+  if [ -n "${interface}" ] && command -v vnstat >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    if output="$(vnstat --json m -i "${interface}" 2>/dev/null)"; then
+      used="$(printf "%s" "${output}" | parse_vnstat_used_gb 2>/dev/null || printf "未知")"
+    fi
+  fi
+
+  printf "%s / %s\n" "${used}" "${total}"
+}
+
+get_telegram_status() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    printf "离线\n"
+    return
+  fi
+
+  if systemctl is-active --quiet "${PANEL_NAME}-listener.service" 2>/dev/null; then
+    printf "在线\n"
+  else
+    printf "离线\n"
+  fi
+}
+
+render_main_panel() {
+  load_config
+
+  cat <<EOF
+========================================
+ Bot 一键面板 - Debian 13
+========================================
+流量:    $(get_traffic_summary)
+TG状态:  $(get_telegram_status)
+
+TG指令说明:
+  /ping    /1 状态    /2 流量
+----------------------------------------
+1. 月流量监控
+2. 关联 Telegram 机器人
+3. 设置每天定时汇报流量
+4. 启动 Telegram 指令监听
+5. 停止 Telegram 指令监听
+6. 查看节点信息
+7. 查看 Telegram 指令说明
+0. 退出
+EOF
 }
 
 install_dependencies() {
@@ -397,10 +481,13 @@ Telegram 指令：
 /speed 节点名
 /status
 /report
+/1
+/2
 /nodes
 /help
 
 说明：
+- /1 等同 /status，/2 等同 /report。
 - 不带节点名代表所有正在监听的 VPS 都会尝试执行。
 - 节点名来自菜单里的 Telegram 绑定配置。
 - 只处理配置的 Chat ID 发来的消息。
@@ -414,17 +501,7 @@ main_menu() {
 
   while true; do
     clear
-    cat <<EOF
-Bot 一键面板 - Debian 13
-1. 月流量监控
-2. 关联 Telegram 机器人
-3. 设置每天定时汇报流量
-4. 启动 Telegram 指令监听
-5. 停止 Telegram 指令监听
-6. 查看节点信息
-7. 查看 Telegram 指令说明
-0. 退出
-EOF
+    render_main_panel
     read -r -p "请选择: " choice
     case "${choice}" in
       1) traffic_menu ;;
