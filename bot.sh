@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-bot-panel}"
-RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/xiangling18/vps-bot/refs/heads/main}"
+RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 AGENT_URL="${BOT_PANEL_AGENT_URL:-${RAW_BASE_URL}/bot_agent.py}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.env}"
@@ -87,6 +87,68 @@ detect_interface() {
   ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}'
 }
 
+list_network_interfaces() {
+  ip -o link show 2>/dev/null \
+    | awk -F': ' '{print $2}' \
+    | cut -d@ -f1 \
+    | awk '$0 != "lo" && !seen[$0]++'
+}
+
+select_monitor_interface() {
+  local default_interface="$1"
+  local interfaces=()
+  local candidate
+  local found_default="0"
+
+  while IFS= read -r candidate; do
+    if [ -z "${candidate}" ]; then
+      continue
+    fi
+    interfaces+=("${candidate}")
+    if [ "${candidate}" = "${default_interface}" ]; then
+      found_default="1"
+    fi
+  done < <(list_network_interfaces)
+
+  if [ -n "${default_interface}" ] && [ "${found_default}" = "0" ]; then
+    interfaces=("${default_interface}" "${interfaces[@]}")
+  fi
+
+  if [ "${#interfaces[@]}" -eq 0 ]; then
+    return 1
+  fi
+
+  if [ "${#interfaces[@]}" -eq 1 ]; then
+    yellow "自动选择监控网卡：${interfaces[0]}" >&2
+    printf "%s\n" "${interfaces[0]}"
+    return
+  fi
+
+  local default_choice="1"
+  local index
+  yellow "检测到多个网卡，请选择要监控的网卡：" >&2
+  for index in "${!interfaces[@]}"; do
+    local number=$((index + 1))
+    local marker=""
+    if [ "${interfaces[index]}" = "${default_interface}" ]; then
+      marker="（默认出口）"
+      default_choice="${number}"
+    fi
+    printf "%s. %s%s\n" "${number}" "${interfaces[index]}" "${marker}" >&2
+  done
+
+  local choice
+  while true; do
+    read -r -p "请输入序号 [${default_choice}]: " choice || choice=""
+    choice="${choice:-${default_choice}}"
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && [ "${choice}" -ge 1 ] && [ "${choice}" -le "${#interfaces[@]}" ]; then
+      printf "%s\n" "${interfaces[choice - 1]}"
+      return
+    fi
+    red "无效序号，请输入 1-${#interfaces[@]}。" >&2
+  done
+}
+
 install_dependencies() {
   require_root
   yellow "正在安装依赖：curl jq vnstat cron python3 iputils-ping speedtest-cli"
@@ -154,8 +216,12 @@ start_traffic_monitor() {
     interface="$(detect_interface)"
   fi
 
-  read -r -p "请输入监控网卡 [${interface}]: " input_interface
-  interface="${input_interface:-${interface}}"
+  if ! interface="$(select_monitor_interface "${interface}")"; then
+    red "未找到可用网卡，请检查网络配置。"
+    pause
+    return
+  fi
+
   read -r -p "请输入本月总流量 GB，例如 500: " total_traffic
 
   if ! [[ "${total_traffic}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
