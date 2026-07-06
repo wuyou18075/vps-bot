@@ -78,6 +78,12 @@ class TelegramCommandTest(unittest.TestCase):
 
     self.assertEqual("[vps-1] 流量汇报", result)
 
+  def test_use_returns_traffic_usage_only(self):
+    with mock.patch("bot_agent.get_traffic_usage", return_value="本月已用: 3.00 GB"):
+      result = bot_agent.handle_command({"NODE_NAME": "vps-1"}, "/use")
+
+    self.assertEqual("[vps-1] 流量使用情况\n本月已用: 3.00 GB", result)
+
   def test_configure_bot_commands_registers_slash_menu(self):
     with mock.patch("bot_agent.telegram_api") as telegram_api:
       bot_agent.configure_bot_commands({"BOT_TOKEN": "token"})
@@ -88,8 +94,16 @@ class TelegramCommandTest(unittest.TestCase):
 
     self.assertEqual("setMyCommands", method)
     self.assertIn({"command": "ping", "description": "Ping 默认目标"}, commands)
-    self.assertIn({"command": "1", "description": "查看节点状态"}, commands)
-    self.assertIn({"command": "2", "description": "查看流量汇报"}, commands)
+    self.assertIn({"command": "use", "description": "查看流量使用"}, commands)
+    self.assertNotIn({"command": "1", "description": "查看节点状态"}, commands)
+    self.assertNotIn({"command": "2", "description": "查看流量汇报"}, commands)
+
+  def test_prepare_listener_deletes_webhook_and_registers_commands(self):
+    with mock.patch("bot_agent.telegram_api") as telegram_api:
+      bot_agent.prepare_listener({"BOT_TOKEN": "token"})
+
+    methods = [call.args[1] for call in telegram_api.call_args_list]
+    self.assertEqual(["deleteWebhook", "setMyCommands"], methods)
 
 
 if __name__ == "__main__":

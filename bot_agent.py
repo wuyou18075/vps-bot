@@ -134,6 +134,7 @@ def command_help_text():
   return "\n".join([
     "支持命令:",
     "/ping [节点名|all] [目标]",
+    "/use [节点名|all]",
     "/speed [节点名|all]",
     "/sudu [节点名|all]",
     "/status [节点名|all]",
@@ -150,8 +151,7 @@ def configure_bot_commands(config):
   commands = [
     {"command": "start", "description": "显示快捷指令"},
     {"command": "ping", "description": "Ping 默认目标"},
-    {"command": "1", "description": "查看节点状态"},
-    {"command": "2", "description": "查看流量汇报"},
+    {"command": "use", "description": "查看流量使用"},
     {"command": "status", "description": "查看节点状态"},
     {"command": "report", "description": "查看流量汇报"},
     {"command": "speed", "description": "测速"},
@@ -161,6 +161,14 @@ def configure_bot_commands(config):
   telegram_api(config, "setMyCommands", {
     "commands": json.dumps(commands, ensure_ascii=False),
   })
+
+
+def prepare_listener(config):
+  """Prepare Telegram polling and the clickable slash command menu."""
+  telegram_api(config, "deleteWebhook", {
+    "drop_pending_updates": "false",
+  })
+  configure_bot_commands(config)
 
 
 def log(message):
@@ -359,6 +367,8 @@ def handle_command(config, text):
     return f"[{node_name}] Ping 结果\n{run_ping(args)}"
   if command in ["speed", "sudu"]:
     return f"[{node_name}] 测速结果\n{run_speedtest()}"
+  if command == "use":
+    return f"[{node_name}] 流量使用情况\n{get_traffic_usage(config)}"
   if command in ["status", "1"]:
     return build_report(config, "状态")
   if command in ["report", "2"]:
@@ -399,7 +409,7 @@ def listen(config):
 
   initialize_last_update(config)
   node_name = config.get("NODE_NAME") or socket.gethostname()
-  configure_bot_commands(config)
+  prepare_listener(config)
   send_message(config, f"[{node_name}] 指令监听已启动")
 
   while True:
@@ -449,11 +459,11 @@ def main():
     send_message(config, build_report(config, "每日流量汇报"))
     return
   if args.send_test:
-    configure_bot_commands(config)
+    prepare_listener(config)
     send_message(config, build_report(config, "绑定测试"))
     return
   if args.set_commands:
-    configure_bot_commands(config)
+    prepare_listener(config)
     return
   if args.traffic_report:
     print(build_report(config, "流量使用情况"))

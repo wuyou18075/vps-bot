@@ -229,7 +229,7 @@ render_main_panel() {
 TG状态:  $(get_telegram_status)
 
 TG指令说明:
-  /ping    /1 状态    /2 流量
+  /ping 延迟    /use 流量    /1 状态    /2 汇报
 ----------------------------------------
 1. 月流量监控
 2. 查看节点信息
@@ -616,6 +616,9 @@ Telegram 指令：
 /ping
 /ping all 1.1.1.1
 /ping 节点名 1.1.1.1
+/use
+/use all
+/use 节点名
 /speed
 /sudu
 /speed 节点名
@@ -627,6 +630,8 @@ Telegram 指令：
 /help
 
 说明：
+- /ping 测延迟。
+- /use 查看本月流量使用情况。
 - /1 等同 /status，/2 等同 /report。
 - 不带节点名代表所有正在监听的 VPS 都会尝试执行。
 - 节点名来自菜单里的 Telegram 绑定配置。

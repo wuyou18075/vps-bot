@@ -71,6 +71,7 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     self.assertIn("TG状态:  离线", output)
     self.assertIn("TG指令说明:", output)
     self.assertIn("/ping", output)
+    self.assertIn("/use", output)
     self.assertIn("/1", output)
     self.assertIn("/2", output)
     self.assertIn("1. 月流量监控", output)
@@ -79,6 +80,18 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     self.assertIn("97. 查看配置文件", output)
     self.assertIn("98. 删除配置文件", output)
     self.assertIn("99. 删除所有", output)
+
+  def test_commands_help_shows_use_command(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      pause() { :; }
+      show_commands_help
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("/use", output)
+    self.assertIn("- /use 查看本月流量使用情况。", output)
 
   def test_traffic_summary_reads_vnstat_json_in_gb(self):
     script = textwrap.dedent("""
