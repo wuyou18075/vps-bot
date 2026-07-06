@@ -155,6 +155,24 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     self.assertIn("Telegram 绑定成功。", output)
     self.assertIn("listener-started", output)
 
+  def test_listener_setup_restarts_existing_service(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1
+      source ./bot.sh
+      SERVICE_FILE=/tmp/bot-panel-test.service
+      systemctl() {
+        printf '%s\\n' "$*"
+      }
+      setup_listener_service
+      rm -f "${SERVICE_FILE}"
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("daemon-reload", output)
+    self.assertIn("enable bot-panel-listener.service", output)
+    self.assertIn("restart bot-panel-listener.service", output)
+
   def test_main_choice_ninety_seven_shows_config(self):
     script = textwrap.dedent("""
       BOT_PANEL_TESTING=1 source ./bot.sh

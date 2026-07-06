@@ -129,6 +129,45 @@ def send_message(config, text):
   })
 
 
+def command_help_text():
+  """Return the supported Telegram command list."""
+  return "\n".join([
+    "支持命令:",
+    "/ping [节点名|all] [目标]",
+    "/speed [节点名|all]",
+    "/sudu [节点名|all]",
+    "/status [节点名|all]",
+    "/report [节点名|all]",
+    "/1 状态快捷指令",
+    "/2 流量快捷指令",
+    "/nodes",
+    "/help",
+  ])
+
+
+def configure_bot_commands(config):
+  """Register Telegram slash commands so clients show a clickable command menu."""
+  commands = [
+    {"command": "start", "description": "显示快捷指令"},
+    {"command": "ping", "description": "Ping 默认目标"},
+    {"command": "1", "description": "查看节点状态"},
+    {"command": "2", "description": "查看流量汇报"},
+    {"command": "status", "description": "查看节点状态"},
+    {"command": "report", "description": "查看流量汇报"},
+    {"command": "speed", "description": "测速"},
+    {"command": "nodes", "description": "查看在线节点"},
+    {"command": "help", "description": "显示帮助"},
+  ]
+  telegram_api(config, "setMyCommands", {
+    "commands": json.dumps(commands, ensure_ascii=False),
+  })
+
+
+def log(message):
+  """Write listener diagnostics to systemd journal/stdout immediately."""
+  print(message, file=sys.stderr, flush=True)
+
+
 def run_command(command, timeout=60):
   """Run a command safely without shell expansion."""
   try:
@@ -314,6 +353,8 @@ def handle_command(config, text):
   elif not command_targets_node(parsed, node_name):
     return None
 
+  if command in ["start", "help"]:
+    return command_help_text()
   if command == "ping":
     return f"[{node_name}] Ping 结果\n{run_ping(args)}"
   if command in ["speed", "sudu"]:
@@ -325,18 +366,6 @@ def handle_command(config, text):
   if command == "nodes":
     public_ip = get_public_ip()
     return f"[{node_name}] 在线\n公网 IP: {public_ip}"
-  if command == "help":
-    return "\n".join([
-      "支持命令:",
-      "/ping [节点名|all] [目标]",
-      "/speed [节点名|all]",
-      "/sudu [节点名|all]",
-      "/status [节点名|all]",
-      "/report [节点名|all]",
-      "/1 状态快捷指令",
-      "/2 流量快捷指令",
-      "/nodes",
-    ])
   return None
 
 
@@ -370,6 +399,7 @@ def listen(config):
 
   initialize_last_update(config)
   node_name = config.get("NODE_NAME") or socket.gethostname()
+  configure_bot_commands(config)
   send_message(config, f"[{node_name}] 指令监听已启动")
 
   while True:
@@ -384,16 +414,20 @@ def listen(config):
         max_seen = max(update_id, max_seen or update_id)
         message = update.get("message") or {}
         chat = message.get("chat") or {}
-        if str(chat.get("id")) != expected_chat_id:
-          continue
         text = message.get("text") or ""
+        log(f"收到更新: update_id={update_id} chat_id={chat.get('id')} text={text!r}")
+        if str(chat.get("id")) != expected_chat_id:
+          log(f"忽略消息: chat_id={chat.get('id')} 与配置 CHAT_ID={expected_chat_id} 不一致")
+          continue
         response = handle_command(config, text)
         if response:
           send_message(config, response)
+        else:
+          log(f"未生成响应: text={text!r}")
       if max_seen is not None:
         write_last_update_id(max_seen)
     except Exception as error:
-      print(f"监听异常: {error}", file=sys.stderr)
+      log(f"监听异常: {error}")
       time.sleep(10)
 
 
@@ -403,6 +437,7 @@ def main():
   parser.add_argument("--listen", action="store_true", help="listen for Telegram commands")
   parser.add_argument("--daily-report", action="store_true", help="send daily traffic report")
   parser.add_argument("--send-test", action="store_true", help="send a test message")
+  parser.add_argument("--set-commands", action="store_true", help="register Telegram slash commands")
   parser.add_argument("--traffic-report", action="store_true", help="print traffic report")
   args = parser.parse_args()
 
@@ -414,7 +449,11 @@ def main():
     send_message(config, build_report(config, "每日流量汇报"))
     return
   if args.send_test:
+    configure_bot_commands(config)
     send_message(config, build_report(config, "绑定测试"))
+    return
+  if args.set_commands:
+    configure_bot_commands(config)
     return
   if args.traffic_report:
     print(build_report(config, "流量使用情况"))

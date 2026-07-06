@@ -490,7 +490,8 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable --now "${PANEL_NAME}-listener.service"
+  systemctl enable "${PANEL_NAME}-listener.service"
+  systemctl restart "${PANEL_NAME}-listener.service"
 }
 
 start_listener() {
