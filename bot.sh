@@ -83,6 +83,14 @@ write_config_value() {
   fi
 }
 
+get_config_file_status() {
+  if [ -f "${CONFIG_FILE}" ]; then
+    printf "%s\n" "${CONFIG_FILE}"
+  else
+    printf "无\n"
+  fi
+}
+
 detect_interface() {
   ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}'
 }
@@ -216,6 +224,7 @@ render_main_panel() {
 ========================================
  Bot 一键面板 - Debian 13
 ========================================
+配置文件:$(get_config_file_status)
 流量:    $(get_traffic_summary)
 TG状态:  $(get_telegram_status)
 
@@ -223,19 +232,68 @@ TG指令说明:
   /ping    /1 状态    /2 流量
 ----------------------------------------
 1. 月流量监控
-2. 关联 Telegram 机器人
-3. 设置每天定时汇报流量
-4. 启动 Telegram 指令监听
-5. 停止 Telegram 指令监听
-6. 查看节点信息
-7. 查看 Telegram 指令说明
+2. 查看节点信息
+3. 关联tg机器人
+5. tg离线休眠
+6. tg重启上线
+7. tg快捷指令说明
+10. 设置每天定时汇报流量
+
+90. 查出定时任务
+97. 查看配置文件
+98. 删除配置文件
+99. 删除所有
 0. 退出
 EOF
 }
 
+has_dependency_command() {
+  local package="$1"
+  local command_name="$2"
+
+  if [ "${package}" = "speedtest-cli" ]; then
+    command -v speedtest-cli >/dev/null 2>&1 || command -v speedtest >/dev/null 2>&1
+    return
+  fi
+
+  command -v "${command_name}" >/dev/null 2>&1
+}
+
+get_missing_dependencies() {
+  local specs=(
+    "curl:curl"
+    "jq:jq"
+    "vnstat:vnstat"
+    "cron:cron"
+    "python3:python3"
+    "iputils-ping:ping"
+    "speedtest-cli:speedtest-cli"
+  )
+  local spec
+  local package
+  local command_name
+
+  for spec in "${specs[@]}"; do
+    package="${spec%%:*}"
+    command_name="${spec#*:}"
+    if ! has_dependency_command "${package}" "${command_name}"; then
+      printf "%s\n" "${package}"
+    fi
+  done
+}
+
 install_dependencies() {
   require_root
-  yellow "正在安装依赖：curl jq vnstat cron python3 iputils-ping speedtest-cli"
+  local missing
+  missing="$(get_missing_dependencies)"
+
+  if [ -z "${missing}" ]; then
+    yellow "依赖已安装，跳过安装。"
+    systemctl enable --now cron >/dev/null 2>&1 || true
+    return
+  fi
+
+  yellow "正在安装缺失依赖：$(printf "%s" "${missing}" | tr "\n" " ")"
 
   if ! command -v apt-get >/dev/null 2>&1; then
     red "当前脚本仅支持 Debian/Ubuntu 系统（需要 apt-get）。"
@@ -243,7 +301,8 @@ install_dependencies() {
   fi
 
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq vnstat cron python3 iputils-ping speedtest-cli
+  # shellcheck disable=SC2086
+  DEBIAN_FRONTEND=noninteractive apt-get install -y ${missing}
   systemctl enable --now cron >/dev/null 2>&1 || true
 }
 
@@ -306,7 +365,8 @@ start_traffic_monitor() {
     return
   fi
 
-  read -r -p "请输入本月总流量 GB，例如 500: " total_traffic
+  read -r -p "请输入本月总流量 GB [${TOTAL_TRAFFIC_GB:-500}]: " total_traffic
+  total_traffic="${total_traffic:-${TOTAL_TRAFFIC_GB:-500}}"
 
   if ! [[ "${total_traffic}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     red "总流量必须是数字。"
@@ -347,10 +407,19 @@ bind_telegram_bot() {
   install_agent_file
   ensure_base_config
 
-  read -r -p "请输入 Telegram Bot Token: " bot_token
-  read -r -p "请输入 Telegram Chat ID: " chat_id
-  read -r -p "请输入当前 VPS 节点名 [$(hostname)]: " node_name
-  node_name="${node_name:-$(hostname)}"
+  load_config
+
+  if [ -n "${BOT_TOKEN:-}" ]; then
+    read -r -p "请输入 Telegram Bot Token [已配置，回车保留]: " bot_token
+    bot_token="${bot_token:-${BOT_TOKEN}}"
+  else
+    read -r -p "请输入 Telegram Bot Token: " bot_token
+  fi
+
+  read -r -p "请输入 Telegram Chat ID [${CHAT_ID:-未设置}]: " chat_id
+  chat_id="${chat_id:-${CHAT_ID:-}}"
+  read -r -p "请输入当前 VPS 节点名 [${NODE_NAME:-$(hostname)}]: " node_name
+  node_name="${node_name:-${NODE_NAME:-$(hostname)}}"
 
   write_config_value "BOT_TOKEN" "${bot_token}"
   write_config_value "CHAT_ID" "${chat_id}"
@@ -358,6 +427,8 @@ bind_telegram_bot() {
 
   if python3 "${AGENT_FILE}" --send-test; then
     green "Telegram 绑定成功。"
+    setup_listener_service
+    green "Telegram 指令监听已启动。"
   else
     red "测试消息发送失败，请检查 Bot Token 和 Chat ID。"
   fi
@@ -368,11 +439,12 @@ setup_daily_report() {
   require_root
   install_agent_file
   ensure_base_config
+  load_config
 
-  read -r -p "请输入每天汇报小时 0-23 [9]: " hour
-  hour="${hour:-9}"
-  read -r -p "请输入分钟 0-59 [0]: " minute
-  minute="${minute:-0}"
+  read -r -p "请输入每天汇报小时 0-23 [${REPORT_HOUR:-9}]: " hour
+  hour="${hour:-${REPORT_HOUR:-9}}"
+  read -r -p "请输入分钟 0-59 [${REPORT_MINUTE:-0}]: " minute
+  minute="${minute:-${REPORT_MINUTE:-0}}"
 
   if ! [[ "${hour}" =~ ^[0-9]+$ ]] || [ "${hour}" -gt 23 ]; then
     red "小时必须是 0-23。"
@@ -391,17 +463,14 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ${minute} ${hour} * * * root /usr/bin/python3 ${AGENT_FILE} --daily-report >/dev/null 2>&1
 EOF
   chmod 644 "${CRON_FILE}"
+  write_config_value "REPORT_HOUR" "${hour}"
+  write_config_value "REPORT_MINUTE" "${minute}"
   systemctl enable --now cron >/dev/null 2>&1 || true
   green "每日流量汇报已设置为 ${hour}:$(printf "%02d" "${minute}")。"
   pause
 }
 
-start_listener() {
-  require_root
-  install_dependencies
-  install_agent_file
-  ensure_base_config
-
+setup_listener_service() {
   cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Bot Panel Telegram Listener
@@ -422,6 +491,15 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now "${PANEL_NAME}-listener.service"
+}
+
+start_listener() {
+  require_root
+  install_dependencies
+  install_agent_file
+  ensure_base_config
+
+  setup_listener_service
   green "Telegram 指令监听已启动。"
   pause
 }
@@ -449,6 +527,47 @@ EOF
   pause
 }
 
+show_cron_jobs() {
+  require_root
+  if [ -f "${CRON_FILE}" ]; then
+    cat "${CRON_FILE}"
+  else
+    yellow "未设置每日定时汇报。"
+  fi
+  pause
+}
+
+show_config_file() {
+  require_root
+  if [ -f "${CONFIG_FILE}" ]; then
+    cat "${CONFIG_FILE}"
+  else
+    yellow "配置文件不存在：${CONFIG_FILE}"
+  fi
+  pause
+}
+
+delete_config_file() {
+  require_root
+  if [ -f "${CONFIG_FILE}" ]; then
+    rm -f "${CONFIG_FILE}"
+    green "已删除配置文件：${CONFIG_FILE}"
+  else
+    yellow "配置文件不存在，无需删除。"
+  fi
+  pause
+}
+
+delete_all() {
+  require_root
+  systemctl disable --now "${PANEL_NAME}-listener.service" >/dev/null 2>&1 || true
+  rm -f "${SERVICE_FILE}" "${CRON_FILE}"
+  rm -rf "${CONFIG_DIR}" "${STATE_DIR}" "${INSTALL_DIR}"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  green "已删除服务、定时任务、配置文件和安装目录。"
+  pause
+}
+
 traffic_menu() {
   while true; do
     clear
@@ -468,6 +587,26 @@ EOF
       *) red "无效选择"; pause ;;
     esac
   done
+}
+
+handle_main_choice() {
+  local choice="$1"
+
+  case "${choice}" in
+    1) traffic_menu ;;
+    2) show_node_info ;;
+    3) bind_telegram_bot ;;
+    5) stop_listener ;;
+    6) start_listener ;;
+    7) show_commands_help ;;
+    10) setup_daily_report ;;
+    90) show_cron_jobs ;;
+    97) show_config_file ;;
+    98) delete_config_file ;;
+    99) delete_all ;;
+    0) exit 0 ;;
+    *) red "无效选择"; pause ;;
+  esac
 }
 
 show_commands_help() {
@@ -497,23 +636,12 @@ EOF
 
 main_menu() {
   require_root
-  ensure_base_config
 
   while true; do
     clear
     render_main_panel
     read -r -p "请选择: " choice
-    case "${choice}" in
-      1) traffic_menu ;;
-      2) bind_telegram_bot ;;
-      3) setup_daily_report ;;
-      4) start_listener ;;
-      5) stop_listener ;;
-      6) show_node_info ;;
-      7) show_commands_help ;;
-      0) exit 0 ;;
-      *) red "无效选择"; pause ;;
-    esac
+    handle_main_choice "${choice}"
   done
 }
 

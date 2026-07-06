@@ -51,25 +51,34 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
   def test_main_panel_shows_status_summary_and_short_commands(self):
     script = textwrap.dedent("""
       BOT_PANEL_TESTING=1 source ./bot.sh
+      CONFIG_FILE=/tmp/bot-panel-test-config.env
+      touch "${CONFIG_FILE}"
       get_traffic_summary() {
-        printf '%s\\n' '12.34G / 500G'
+        printf '%s\\n' '0.00G / 500G'
       }
       get_telegram_status() {
-        printf '%s\\n' '在线'
+        printf '%s\\n' '离线'
       }
       render_main_panel
+      rm -f "${CONFIG_FILE}"
     """)
 
     output = self.run_bash(script)
 
     self.assertIn("Bot 一键面板 - Debian 13", output)
-    self.assertIn("流量:    12.34G / 500G", output)
-    self.assertIn("TG状态:  在线", output)
+    self.assertIn("配置文件:/tmp/bot-panel-test-config.env", output)
+    self.assertIn("流量:    0.00G / 500G", output)
+    self.assertIn("TG状态:  离线", output)
     self.assertIn("TG指令说明:", output)
     self.assertIn("/ping", output)
     self.assertIn("/1", output)
     self.assertIn("/2", output)
     self.assertIn("1. 月流量监控", output)
+    self.assertIn("10. 设置每天定时汇报流量", output)
+    self.assertIn("90. 查出定时任务", output)
+    self.assertIn("97. 查看配置文件", output)
+    self.assertIn("98. 删除配置文件", output)
+    self.assertIn("99. 删除所有", output)
 
   def test_traffic_summary_reads_vnstat_json_in_gb(self):
     script = textwrap.dedent("""
@@ -84,6 +93,76 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     """)
 
     self.assertEqual("3.00G / 500G", self.run_bash(script))
+
+  def test_config_file_status_shows_none_when_missing(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      CONFIG_FILE=/tmp/bot-panel-missing-config.env
+      rm -f "${CONFIG_FILE}"
+      get_config_file_status
+    """)
+
+    self.assertEqual("无", self.run_bash(script))
+
+  def test_missing_dependencies_is_empty_when_commands_exist(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      command() {
+        if [ "$1" = "-v" ]; then
+          return 0
+        fi
+        builtin command "$@"
+      }
+      get_missing_dependencies
+    """)
+
+    self.assertEqual("", self.run_bash(script))
+
+  def test_main_choice_two_shows_node_info(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      show_node_info() { printf '%s\\n' node; }
+      handle_main_choice 2
+    """)
+
+    self.assertEqual("node", self.run_bash(script))
+
+  def test_main_choice_three_binds_telegram(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      bind_telegram_bot() { printf '%s\\n' bind; }
+      handle_main_choice 3
+    """)
+
+    self.assertEqual("bind", self.run_bash(script))
+
+  def test_bind_telegram_starts_listener_after_successful_test(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1
+      source ./bot.sh
+      install_dependencies() { :; }
+      install_agent_file() { :; }
+      ensure_base_config() { :; }
+      write_config_value() { :; }
+      python3() { return 0; }
+      setup_listener_service() { printf '%s\\n' listener-started; }
+      pause() { :; }
+      bind_telegram_bot
+    """)
+
+    output = self.run_bash(script, stdin="token\nchat\nnode\n")
+
+    self.assertIn("Telegram 绑定成功。", output)
+    self.assertIn("listener-started", output)
+
+  def test_main_choice_ninety_seven_shows_config(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      show_config_file() { printf '%s\\n' config; }
+      handle_main_choice 97
+    """)
+
+    self.assertEqual("config", self.run_bash(script))
 
 
 if __name__ == "__main__":
