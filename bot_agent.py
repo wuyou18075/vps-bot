@@ -109,8 +109,7 @@ def parse_node_list(config):
 
 def control_node_name(config):
   """Return the node responsible for visible selection prompts."""
-  nodes = parse_node_list(config)
-  return config.get("CONTROL_NODE") or (nodes[0] if nodes else config.get("NODE_NAME"))
+  return (config.get("CONTROL_NODE") or "").strip()
 
 
 def is_control_node(config):

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-bot-panel}"
-SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.7}"
+SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.8}"
 SCRIPT_VERSION_STATUS_CACHE=""
 RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 AGENT_URL="${BOT_PANEL_AGENT_URL:-${RAW_BASE_URL}/bot_agent.py}"
@@ -503,8 +503,8 @@ bind_telegram_bot() {
   node_name="${node_name:-${NODE_NAME:-$(hostname)}}"
   read -r -p "请输入所有 VPS 节点名，逗号分隔 [${NODE_LIST:-${node_name}}]: " node_list
   node_list="${node_list:-${NODE_LIST:-${node_name}}}"
-  read -r -p "请输入控制节点名 [${CONTROL_NODE:-${node_name}}]: " control_node
-  control_node="${control_node:-${CONTROL_NODE:-${node_name}}}"
+  read -r -p "请输入控制节点名（只在一台 VPS 上填写，其他机器留空） [${CONTROL_NODE:-留空}]: " control_node
+  control_node="${control_node:-${CONTROL_NODE:-}}"
 
   write_config_value "BOT_TOKEN" "${bot_token}"
   write_config_value "CHAT_ID" "${chat_id}"

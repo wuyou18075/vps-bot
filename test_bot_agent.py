@@ -126,6 +126,14 @@ class TelegramCommandTest(unittest.TestCase):
 
     self.assertIsNone(result)
 
+  def test_select_menu_is_silent_without_explicit_control_node(self):
+    result = bot_agent.handle_command({
+      "NODE_NAME": "vps2",
+      "NODE_LIST": "vps2",
+    }, "/select")
+
+    self.assertIsNone(result)
+
   def test_numeric_selection_reply_updates_scope(self):
     config = {
       "NODE_NAME": "vps1",

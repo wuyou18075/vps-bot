@@ -338,6 +338,25 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     self.assertIn("NODE_LIST=node,vps2,vps3", output)
     self.assertIn("CONTROL_NODE=node", output)
 
+  def test_bind_telegram_can_leave_control_node_empty(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1
+      source ./bot.sh
+      install_dependencies() { :; }
+      install_agent_file() { :; }
+      ensure_base_config() { :; }
+      write_config_value() { printf '%s=%s\\n' "$1" "$2"; }
+      python3() { return 0; }
+      setup_listener_service() { :; }
+      pause() { :; }
+      bind_telegram_bot
+    """)
+
+    output = self.run_bash(script, stdin="token\nchat\nnode\nnode,vps2,vps3\n\n")
+
+    self.assertIn("NODE_LIST=node,vps2,vps3", output)
+    self.assertIn("CONTROL_NODE=\n", output)
+
   def test_listener_setup_restarts_existing_service(self):
     script = textwrap.dedent("""
       BOT_PANEL_TESTING=1
