@@ -2,7 +2,8 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-bot-panel}"
-SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.4}"
+SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.5}"
+SCRIPT_VERSION_STATUS_CACHE=""
 RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 AGENT_URL="${BOT_PANEL_AGENT_URL:-${RAW_BASE_URL}/bot_agent.py}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -124,16 +125,23 @@ get_latest_script_version() {
 get_script_version_status() {
   local latest
 
+  if [ -n "${SCRIPT_VERSION_STATUS_CACHE}" ]; then
+    printf "%s\n" "${SCRIPT_VERSION_STATUS_CACHE}"
+    return
+  fi
+
   if ! latest="$(get_latest_script_version)"; then
-    printf "本地 %s / 最新 未知\n" "${SCRIPT_VERSION}"
+    SCRIPT_VERSION_STATUS_CACHE="本地 ${SCRIPT_VERSION} / 最新 未知"
+    printf "%s\n" "${SCRIPT_VERSION_STATUS_CACHE}"
     return
   fi
 
   if [ "${latest}" = "${SCRIPT_VERSION}" ]; then
-    printf "本地 %s / 最新 %s (已最新)\n" "${SCRIPT_VERSION}" "${latest}"
+    SCRIPT_VERSION_STATUS_CACHE="本地 ${SCRIPT_VERSION} / 最新 ${latest} (已最新)"
   else
-    printf "本地 %s / 最新 %s (可更新)\n" "${SCRIPT_VERSION}" "${latest}"
+    SCRIPT_VERSION_STATUS_CACHE="本地 ${SCRIPT_VERSION} / 最新 ${latest} (可更新)"
   fi
+  printf "%s\n" "${SCRIPT_VERSION_STATUS_CACHE}"
 }
 
 get_selected_nodes_status() {

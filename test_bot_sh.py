@@ -173,6 +173,27 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
       self.run_bash(script),
     )
 
+  def test_script_version_status_is_cached_per_run(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      SCRIPT_VERSION=2026.07.06.2
+      counter=/tmp/bot-panel-version-counter
+      rm -f "${counter}"
+      get_latest_script_version() {
+        printf x >> "${counter}"
+        printf '%s\\n' 2026.07.06.2
+      }
+      get_script_version_status
+      get_script_version_status
+      printf 'calls=%s\\n' "$(wc -c < "${counter}")"
+      rm -f "${counter}"
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("本地 2026.07.06.2 / 最新 2026.07.06.2 (已最新)", output)
+    self.assertIn("calls=1", output)
+
   def test_commands_help_shows_use_command(self):
     script = textwrap.dedent("""
       BOT_PANEL_TESTING=1 source ./bot.sh
