@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-bot-panel}"
+SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.2}"
 RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 AGENT_URL="${BOT_PANEL_AGENT_URL:-${RAW_BASE_URL}/bot_agent.py}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -88,6 +89,46 @@ get_config_file_status() {
     printf "%s\n" "${CONFIG_FILE}"
   else
     printf "无\n"
+  fi
+}
+
+get_latest_script_version() {
+  local output
+  local version
+
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if ! output="$(curl -fsSL \
+      --connect-timeout 5 \
+      -H "Cache-Control: no-cache" \
+      "${RAW_BASE_URL}/bot.sh?t=${RANDOM}" 2>/dev/null)"; then
+    return 1
+  fi
+
+  version="$(printf "%s\n" "${output}" \
+    | sed -n 's/^SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-\([^}]*\)}".*/\1/p' \
+    | head -n 1)"
+  if [ -z "${version}" ]; then
+    return 1
+  fi
+
+  printf "%s\n" "${version}"
+}
+
+get_script_version_status() {
+  local latest
+
+  if ! latest="$(get_latest_script_version)"; then
+    printf "本地 %s / 最新 未知\n" "${SCRIPT_VERSION}"
+    return
+  fi
+
+  if [ "${latest}" = "${SCRIPT_VERSION}" ]; then
+    printf "本地 %s / 最新 %s (已最新)\n" "${SCRIPT_VERSION}" "${latest}"
+  else
+    printf "本地 %s / 最新 %s (可更新)\n" "${SCRIPT_VERSION}" "${latest}"
   fi
 }
 
@@ -225,6 +266,7 @@ render_main_panel() {
  Bot 一键面板 - Debian 13
 ========================================
 配置文件:$(get_config_file_status)
+脚本版本:$(get_script_version_status)
 流量:    $(get_traffic_summary)
 TG状态:  $(get_telegram_status)
 

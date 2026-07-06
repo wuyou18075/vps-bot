@@ -59,6 +59,9 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
       get_telegram_status() {
         printf '%s\\n' '离线'
       }
+      get_script_version_status() {
+        printf '%s\\n' '本地 2026.07.06.2 / 最新 2026.07.06.2 (已最新)'
+      }
       render_main_panel
       rm -f "${CONFIG_FILE}"
     """)
@@ -67,6 +70,7 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
 
     self.assertIn("Bot 一键面板 - Debian 13", output)
     self.assertIn("配置文件:/tmp/bot-panel-test-config.env", output)
+    self.assertIn("脚本版本:本地 2026.07.06.2 / 最新 2026.07.06.2 (已最新)", output)
     self.assertIn("流量:    0.00G / 500G", output)
     self.assertIn("TG状态:  离线", output)
     self.assertIn("TG指令说明:", output)
@@ -80,6 +84,51 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     self.assertIn("97. 查看配置文件", output)
     self.assertIn("98. 删除配置文件", output)
     self.assertIn("99. 删除所有", output)
+
+  def test_script_version_status_marks_latest(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      SCRIPT_VERSION=2026.07.06.2
+      get_latest_script_version() {
+        printf '%s\\n' 2026.07.06.2
+      }
+      get_script_version_status
+    """)
+
+    self.assertEqual(
+      "本地 2026.07.06.2 / 最新 2026.07.06.2 (已最新)",
+      self.run_bash(script),
+    )
+
+  def test_script_version_status_marks_outdated(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      SCRIPT_VERSION=2026.07.06.1
+      get_latest_script_version() {
+        printf '%s\\n' 2026.07.06.2
+      }
+      get_script_version_status
+    """)
+
+    self.assertEqual(
+      "本地 2026.07.06.1 / 最新 2026.07.06.2 (可更新)",
+      self.run_bash(script),
+    )
+
+  def test_script_version_status_handles_unknown_latest(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      SCRIPT_VERSION=2026.07.06.2
+      get_latest_script_version() {
+        return 1
+      }
+      get_script_version_status
+    """)
+
+    self.assertEqual(
+      "本地 2026.07.06.2 / 最新 未知",
+      self.run_bash(script),
+    )
 
   def test_commands_help_shows_use_command(self):
     script = textwrap.dedent("""
