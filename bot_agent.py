@@ -164,6 +164,25 @@ def get_public_ip():
     return "未知"
 
 
+def get_vnstat_months(data):
+  """Extract monthly traffic entries from supported vnStat JSON shapes."""
+  if isinstance(data.get("interfaces"), list) and data["interfaces"]:
+    traffic = data["interfaces"][0].get("traffic", {})
+    return traffic.get("month", [])
+  if isinstance(data.get("traffic"), dict):
+    return data["traffic"].get("month", [])
+  return []
+
+
+def get_month_traffic_bytes(months):
+  """Return rx + tx bytes from the latest vnStat month entry."""
+  if not months:
+    return 0
+
+  current = months[-1]
+  return int(current.get("rx", 0)) + int(current.get("tx", 0))
+
+
 def get_traffic_usage(config):
   """Read current monthly traffic usage from vnStat."""
   interface = config.get("INTERFACE") or get_default_interface()
@@ -178,9 +197,7 @@ def get_traffic_usage(config):
 
   try:
     data = json.loads(output)
-    months = data["interfaces"][0]["traffic"]["month"]
-    current = months[-1]
-    used = int(current.get("rx", 0)) + int(current.get("tx", 0))
+    used = get_month_traffic_bytes(get_vnstat_months(data))
   except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
     return "解析 vnstat 数据失败"
 
@@ -285,13 +302,17 @@ def handle_command(config, text):
     return None
 
   node_name = config.get("NODE_NAME") or socket.gethostname()
-  if not command_targets_node(parsed, node_name):
-    return None
-
   command = parsed["command"]
   args = parsed["args"]
-  if parsed["target"] in ["all", "*"]:
-    args = parsed["args"]
+
+  if command == "ping" and parsed["target"] and parsed["target"] not in ["all", "*", node_name]:
+    if parsed["args"]:
+      if not command_targets_node(parsed, node_name):
+        return None
+    else:
+      args = [parsed["target"]]
+  elif not command_targets_node(parsed, node_name):
+    return None
 
   if command == "ping":
     return f"[{node_name}] Ping 结果\n{run_ping(args)}"
