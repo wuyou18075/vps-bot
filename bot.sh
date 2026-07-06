@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-bot-panel}"
-SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.2}"
+SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.3}"
 RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 AGENT_URL="${BOT_PANEL_AGENT_URL:-${RAW_BASE_URL}/bot_agent.py}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -32,7 +32,7 @@ require_root() {
 
   if [ "$(id -u)" -ne 0 ]; then
     red "请使用 root 运行：sudo bash bot.sh"
-    red "一键安装：bash <(curl -fsSL -H \"Cache-Control: no-cache\" \"${RAW_BASE_URL}/bot.sh?t=\$RANDOM\")"
+    red "一键安装：bash <(curl -fsSL -H \"Cache-Control: no-cache, no-store, must-revalidate\" -H \"Pragma: no-cache\" -H \"Expires: 0\" \"${RAW_BASE_URL}/bot.sh?t=\$(date +%s)\")"
     exit 1
   fi
 }
@@ -51,7 +51,9 @@ download_file() {
     --connect-timeout 15 \
     --retry 3 \
     --retry-delay 2 \
-    -H "Cache-Control: no-cache" \
+    -H "Cache-Control: no-cache, no-store, must-revalidate" \
+    -H "Pragma: no-cache" \
+    -H "Expires: 0" \
     "${url}" \
     -o "${temp_file}"; then
     rm -f "${temp_file}"
@@ -102,8 +104,10 @@ get_latest_script_version() {
 
   if ! output="$(curl -fsSL \
       --connect-timeout 5 \
-      -H "Cache-Control: no-cache" \
-      "${RAW_BASE_URL}/bot.sh?t=${RANDOM}" 2>/dev/null)"; then
+      -H "Cache-Control: no-cache, no-store, must-revalidate" \
+      -H "Pragma: no-cache" \
+      -H "Expires: 0" \
+      "${RAW_BASE_URL}/bot.sh?t=$(date +%s)" 2>/dev/null)"; then
     return 1
   fi
 
@@ -129,6 +133,21 @@ get_script_version_status() {
     printf "本地 %s / 最新 %s (已最新)\n" "${SCRIPT_VERSION}" "${latest}"
   else
     printf "本地 %s / 最新 %s (可更新)\n" "${SCRIPT_VERSION}" "${latest}"
+  fi
+}
+
+get_selected_nodes_status() {
+  local selected_file="${STATE_DIR}/selected_nodes"
+  local selected=""
+
+  if [ -f "${selected_file}" ]; then
+    selected="$(tr -d '\r\n' < "${selected_file}")"
+  fi
+
+  if [ -z "${selected}" ] || [ "${selected}" = "all" ]; then
+    printf "全部\n"
+  else
+    printf "%s\n" "${selected}"
   fi
 }
 
@@ -267,6 +286,7 @@ render_main_panel() {
 ========================================
 配置文件:$(get_config_file_status)
 脚本版本:$(get_script_version_status)
+TG选择范围:$(get_selected_nodes_status)
 流量:    $(get_traffic_summary)
 TG状态:  $(get_telegram_status)
 
@@ -365,7 +385,7 @@ install_agent_file() {
     cp "${source_agent}" "${AGENT_FILE}"
   else
     yellow "未找到本地 bot_agent.py，正在从远端下载..."
-    download_file "${AGENT_URL}?t=${RANDOM}" "${AGENT_FILE}"
+    download_file "${AGENT_URL}?t=$(date +%s)" "${AGENT_FILE}"
   fi
 
   chmod 755 "${AGENT_FILE}"
@@ -462,10 +482,16 @@ bind_telegram_bot() {
   chat_id="${chat_id:-${CHAT_ID:-}}"
   read -r -p "请输入当前 VPS 节点名 [${NODE_NAME:-$(hostname)}]: " node_name
   node_name="${node_name:-${NODE_NAME:-$(hostname)}}"
+  read -r -p "请输入所有 VPS 节点名，逗号分隔 [${NODE_LIST:-${node_name}}]: " node_list
+  node_list="${node_list:-${NODE_LIST:-${node_name}}}"
+  read -r -p "请输入控制节点名 [${CONTROL_NODE:-${node_name}}]: " control_node
+  control_node="${control_node:-${CONTROL_NODE:-${node_name}}}"
 
   write_config_value "BOT_TOKEN" "${bot_token}"
   write_config_value "CHAT_ID" "${chat_id}"
   write_config_value "NODE_NAME" "${node_name}"
+  write_config_value "NODE_LIST" "${node_list}"
+  write_config_value "CONTROL_NODE" "${control_node}"
 
   if python3 "${AGENT_FILE}" --send-test; then
     green "Telegram 绑定成功。"
@@ -655,28 +681,31 @@ handle_main_choice() {
 show_commands_help() {
   cat <<EOF
 Telegram 指令：
+/select
 /ping
-/ping all 1.1.1.1
-/ping 节点名 1.1.1.1
+/ping 1.1.1.1
 /use
-/use all
-/use 节点名
 /speed
-/sudu
-/speed 节点名
 /status
 /report
+/disk
+/top
+/uptime
+/services
 /1
 /2
 /nodes
 /help
 
 说明：
+- /select 选择后续命令要执行的 VPS 范围。
 - /ping 测延迟。
-- /use 查看本月流量使用情况。
+- /use 查看月流量和今日流量。
+- /speed 测速。
+- /disk 查看磁盘详情，/top 查看高占用进程。
+- /uptime 查看运行时间，/services 查看关键服务状态。
 - /1 等同 /status，/2 等同 /report。
-- 不带节点名代表所有正在监听的 VPS 都会尝试执行。
-- 节点名来自菜单里的 Telegram 绑定配置。
+- 选择范围由 /select 控制；未选择时默认全部 VPS 响应。
 - 只处理配置的 Chat ID 发来的消息。
 EOF
   pause

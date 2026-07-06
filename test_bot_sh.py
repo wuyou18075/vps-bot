@@ -62,6 +62,9 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
       get_script_version_status() {
         printf '%s\\n' '本地 2026.07.06.2 / 最新 2026.07.06.2 (已最新)'
       }
+      get_selected_nodes_status() {
+        printf '%s\\n' 'vps2,vps3'
+      }
       render_main_panel
       rm -f "${CONFIG_FILE}"
     """)
@@ -71,6 +74,7 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     self.assertIn("Bot 一键面板 - Debian 13", output)
     self.assertIn("配置文件:/tmp/bot-panel-test-config.env", output)
     self.assertIn("脚本版本:本地 2026.07.06.2 / 最新 2026.07.06.2 (已最新)", output)
+    self.assertIn("TG选择范围:vps2,vps3", output)
     self.assertIn("流量:    0.00G / 500G", output)
     self.assertIn("TG状态:  离线", output)
     self.assertIn("TG指令说明:", output)
@@ -84,6 +88,47 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
     self.assertIn("97. 查看配置文件", output)
     self.assertIn("98. 删除配置文件", output)
     self.assertIn("99. 删除所有", output)
+
+  def test_selected_nodes_status_reads_state_file(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      STATE_DIR=/tmp/bot-panel-test-state
+      mkdir -p "${STATE_DIR}"
+      printf '%s\\n' 'vps2,vps3' > "${STATE_DIR}/selected_nodes"
+      get_selected_nodes_status
+      rm -rf "${STATE_DIR}"
+    """)
+
+    self.assertEqual("vps2,vps3", self.run_bash(script))
+
+  def test_selected_nodes_status_defaults_to_all(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      STATE_DIR=/tmp/bot-panel-test-empty-state
+      rm -rf "${STATE_DIR}"
+      get_selected_nodes_status
+    """)
+
+    self.assertEqual("全部", self.run_bash(script))
+
+  def test_download_file_uses_no_cache_headers(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      mktemp() { printf '%s\\n' /tmp/bot-panel-download-test; }
+      curl() {
+        printf '%s\\n' "$*"
+        printf '%s\\n' ok > /tmp/bot-panel-download-test
+      }
+      mv() { :; }
+      download_file https://example.com/bot_agent.py /tmp/target
+      rm -f /tmp/bot-panel-download-test
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("Cache-Control: no-cache, no-store, must-revalidate", output)
+    self.assertIn("Pragma: no-cache", output)
+    self.assertIn("Expires: 0", output)
 
   def test_script_version_status_marks_latest(self):
     script = textwrap.dedent("""
@@ -139,8 +184,14 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
 
     output = self.run_bash(script)
 
+    self.assertIn("/select", output)
     self.assertIn("/use", output)
-    self.assertIn("- /use 查看本月流量使用情况。", output)
+    self.assertIn("/disk", output)
+    self.assertIn("/top", output)
+    self.assertIn("/uptime", output)
+    self.assertIn("/services", output)
+    self.assertNotIn("/sudu", output)
+    self.assertIn("- /use 查看月流量和今日流量。", output)
 
   def test_traffic_summary_reads_vnstat_json_in_gb(self):
     script = textwrap.dedent("""
@@ -205,17 +256,19 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
       install_dependencies() { :; }
       install_agent_file() { :; }
       ensure_base_config() { :; }
-      write_config_value() { :; }
+      write_config_value() { printf '%s=%s\\n' "$1" "$2"; }
       python3() { return 0; }
       setup_listener_service() { printf '%s\\n' listener-started; }
       pause() { :; }
       bind_telegram_bot
     """)
 
-    output = self.run_bash(script, stdin="token\nchat\nnode\n")
+    output = self.run_bash(script, stdin="token\nchat\nnode\nnode,vps2,vps3\nnode\n")
 
     self.assertIn("Telegram 绑定成功。", output)
     self.assertIn("listener-started", output)
+    self.assertIn("NODE_LIST=node,vps2,vps3", output)
+    self.assertIn("CONTROL_NODE=node", output)
 
   def test_listener_setup_restarts_existing_service(self):
     script = textwrap.dedent("""

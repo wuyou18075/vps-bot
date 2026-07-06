@@ -18,6 +18,8 @@ import urllib.request
 CONFIG_FILE = os.environ.get("BOT_PANEL_CONFIG", "/etc/bot-panel/config.env")
 STATE_DIR = os.environ.get("BOT_PANEL_STATE_DIR", "/var/lib/bot-panel")
 LAST_UPDATE_FILE = os.path.join(STATE_DIR, "last_update_id")
+PENDING_SELECT_FILE = os.path.join(STATE_DIR, "pending_select")
+SELECTED_NODES_FILE = os.path.join(STATE_DIR, "selected_nodes")
 
 
 def load_config(path=CONFIG_FILE):
@@ -94,6 +96,83 @@ def write_last_update_id(update_id):
     file.write(str(update_id))
 
 
+def parse_node_list(config):
+  """Return configured VPS node names."""
+  raw_nodes = config.get("NODE_LIST") or config.get("NODE_NAME") or socket.gethostname()
+  nodes = []
+  for item in re.split(r"[,，\s]+", raw_nodes):
+    node = item.strip()
+    if node and node not in nodes:
+      nodes.append(node)
+  return nodes
+
+
+def control_node_name(config):
+  """Return the node responsible for visible selection prompts."""
+  nodes = parse_node_list(config)
+  return config.get("CONTROL_NODE") or (nodes[0] if nodes else config.get("NODE_NAME"))
+
+
+def is_control_node(config):
+  """Return whether this node should answer shared control commands."""
+  node_name = config.get("NODE_NAME") or socket.gethostname()
+  return node_name == control_node_name(config)
+
+
+def write_pending_select(enabled=True):
+  """Persist whether the next numeric Telegram text should update selection."""
+  ensure_state_dir()
+  if enabled:
+    with open(PENDING_SELECT_FILE, "w", encoding="utf-8") as file:
+      file.write("1")
+    return
+  try:
+    os.remove(PENDING_SELECT_FILE)
+  except FileNotFoundError:
+    pass
+
+
+def has_pending_select():
+  """Return whether a /select prompt is waiting for a numeric reply."""
+  return os.path.exists(PENDING_SELECT_FILE)
+
+
+def read_selected_nodes():
+  """Read selected node scope from local state."""
+  try:
+    with open(SELECTED_NODES_FILE, "r", encoding="utf-8") as file:
+      value = file.read().strip()
+  except FileNotFoundError:
+    return []
+  if not value:
+    return []
+  return [item for item in value.split(",") if item]
+
+
+def write_selected_nodes(nodes):
+  """Persist selected node scope to local state."""
+  ensure_state_dir()
+  with open(SELECTED_NODES_FILE, "w", encoding="utf-8") as file:
+    file.write(",".join(nodes))
+
+
+def selected_scope_text():
+  """Return a human-readable selected scope."""
+  selected = read_selected_nodes()
+  if not selected or selected == ["all"]:
+    return "全部"
+  return ",".join(selected)
+
+
+def command_in_selected_scope(config):
+  """Return whether this node should answer selected-scope commands."""
+  selected = read_selected_nodes()
+  if not selected or selected == ["all"]:
+    return True
+  node_name = config.get("NODE_NAME") or socket.gethostname()
+  return node_name in selected
+
+
 def telegram_api(config, method, data=None, timeout=30):
   """Call a Telegram Bot API method."""
   token = config.get("BOT_TOKEN")
@@ -132,13 +211,18 @@ def send_message(config, text):
 def command_help_text():
   """Return the supported Telegram command list."""
   return "\n".join([
+    f"当前选择: {selected_scope_text()}",
     "支持命令:",
-    "/ping [节点名|all] [目标]",
-    "/use [节点名|all]",
-    "/speed [节点名|all]",
-    "/sudu [节点名|all]",
-    "/status [节点名|all]",
-    "/report [节点名|all]",
+    "/select 选择 VPS 范围",
+    "/ping [目标]",
+    "/use",
+    "/speed",
+    "/status",
+    "/report",
+    "/disk",
+    "/top",
+    "/uptime",
+    "/services",
     "/1 状态快捷指令",
     "/2 流量快捷指令",
     "/nodes",
@@ -150,11 +234,16 @@ def configure_bot_commands(config):
   """Register Telegram slash commands so clients show a clickable command menu."""
   commands = [
     {"command": "start", "description": "显示快捷指令"},
+    {"command": "select", "description": "选择 VPS 范围"},
     {"command": "ping", "description": "Ping 默认目标"},
     {"command": "use", "description": "查看流量使用"},
     {"command": "status", "description": "查看节点状态"},
     {"command": "report", "description": "查看流量汇报"},
     {"command": "speed", "description": "测速"},
+    {"command": "disk", "description": "查看磁盘详情"},
+    {"command": "top", "description": "查看高占用进程"},
+    {"command": "uptime", "description": "查看运行时间"},
+    {"command": "services", "description": "查看关键服务"},
     {"command": "nodes", "description": "查看在线节点"},
     {"command": "help", "description": "显示帮助"},
   ]
@@ -221,12 +310,30 @@ def get_vnstat_months(data):
   return []
 
 
+def get_vnstat_days(data):
+  """Extract daily traffic entries from supported vnStat JSON shapes."""
+  if isinstance(data.get("interfaces"), list) and data["interfaces"]:
+    traffic = data["interfaces"][0].get("traffic", {})
+    return traffic.get("day", [])
+  if isinstance(data.get("traffic"), dict):
+    return data["traffic"].get("day", [])
+  return []
+
+
 def get_month_traffic_bytes(months):
   """Return rx + tx bytes from the latest vnStat month entry."""
   if not months:
     return 0
 
   current = months[-1]
+  return int(current.get("rx", 0)) + int(current.get("tx", 0))
+
+
+def get_latest_traffic_bytes(entries):
+  """Return rx + tx bytes from the latest vnStat traffic entry."""
+  if not entries:
+    return 0
+  current = entries[-1]
   return int(current.get("rx", 0)) + int(current.get("tx", 0))
 
 
@@ -245,6 +352,7 @@ def get_traffic_usage(config):
   try:
     data = json.loads(output)
     used = get_month_traffic_bytes(get_vnstat_months(data))
+    today_used = get_latest_traffic_bytes(get_vnstat_days(data))
   except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
     return "解析 vnstat 数据失败"
 
@@ -255,6 +363,7 @@ def get_traffic_usage(config):
   return "\n".join([
     f"网卡: {interface}",
     f"本月已用: {bytes_to_human(used)}",
+    f"今日已用: {bytes_to_human(today_used)}",
     f"月总流量: {limit_text}",
     f"使用比例: {percent:.2f}%" if total_bytes else "使用比例: 未设置",
   ])
@@ -331,6 +440,47 @@ def run_speedtest():
   return output[-3500:]
 
 
+def get_disk_detail():
+  """Return filesystem usage details."""
+  code, output, error = run_command(["df", "-h"], timeout=10)
+  if code != 0:
+    return f"读取磁盘失败: {error or output}"
+  return output[-3500:]
+
+
+def get_top_processes():
+  """Return highest CPU and memory processes."""
+  code, output, error = run_command([
+    "ps", "-eo", "pid,comm,%cpu,%mem", "--sort=-%cpu",
+  ], timeout=10)
+  if code != 0:
+    return f"读取进程失败: {error or output}"
+  return "\n".join(output.splitlines()[:8])
+
+
+def get_uptime_status():
+  """Return uptime and load status."""
+  code, output, error = run_command(["uptime", "-p"], timeout=5)
+  code_load, load_output, _ = run_command(["cat", "/proc/loadavg"], timeout=5)
+  uptime = output if code == 0 else f"读取 uptime 失败: {error or output}"
+  load = " ".join(load_output.split()[:3]) if code_load == 0 else "未知"
+  return "\n".join([
+    f"运行时间: {uptime}",
+    f"负载: {load}",
+  ])
+
+
+def get_services_status():
+  """Return key service states."""
+  services = ["ssh", "cron", "vnstat", "bot-panel-listener"]
+  lines = []
+  for service in services:
+    code, output, _ = run_command(["systemctl", "is-active", service], timeout=5)
+    status = output if code == 0 and output else "inactive"
+    lines.append(f"{service}: {status}")
+  return "\n".join(lines)
+
+
 def build_report(config, title):
   """Build a full node report message."""
   node_name = config.get("NODE_NAME") or socket.gethostname()
@@ -342,6 +492,66 @@ def build_report(config, title):
   ])
 
 
+def build_select_menu(config):
+  """Build the numbered VPS selection menu."""
+  write_pending_select(True)
+  lines = [
+    f"当前选择: {selected_scope_text()}",
+    "",
+    "0 清空",
+  ]
+  for index, node in enumerate(parse_node_list(config), start=1):
+    lines.append(f"{index} {node}")
+  lines.extend([
+    "99 所有",
+    "",
+    "回复数字，例如: 2,3",
+  ])
+  return "\n".join(lines)
+
+
+def apply_selection_reply(config, text):
+  """Apply a numeric /select reply and return a control-node confirmation."""
+  nodes = parse_node_list(config)
+  raw_items = [item.strip() for item in re.split(r"[,，\s]+", text) if item.strip()]
+  selected = []
+
+  if not raw_items:
+    return "选择无效，请回复数字，例如: 2,3"
+  if raw_items == ["0"]:
+    write_selected_nodes([])
+    write_pending_select(False)
+    return "已清空选择，当前范围: 全部"
+  if raw_items == ["99"]:
+    write_selected_nodes(["all"])
+    write_pending_select(False)
+    return "已选择: 全部"
+
+  for item in raw_items:
+    if not item.isdigit():
+      return "选择无效，请回复数字，例如: 2,3"
+    index = int(item)
+    if index < 1 or index > len(nodes):
+      return f"选择无效，请输入 1-{len(nodes)}、0 或 99"
+    node = nodes[index - 1]
+    if node not in selected:
+      selected.append(node)
+
+  write_selected_nodes(selected)
+  write_pending_select(False)
+  return f"已选择: {','.join(selected)}"
+
+
+def handle_text(config, text):
+  """Handle non-command Telegram text replies."""
+  if not has_pending_select():
+    return None
+  response = apply_selection_reply(config, text.strip())
+  if is_control_node(config):
+    return response
+  return None
+
+
 def handle_command(config, text):
   """Execute a supported Telegram command and return a response."""
   parsed = parse_command(text)
@@ -351,6 +561,19 @@ def handle_command(config, text):
   node_name = config.get("NODE_NAME") or socket.gethostname()
   command = parsed["command"]
   args = parsed["args"]
+  selected_commands = [
+    "ping", "speed", "sudu", "use", "status", "1", "report", "2",
+    "disk", "top", "uptime", "services",
+  ]
+
+  if command == "select":
+    if is_control_node(config):
+      return build_select_menu(config)
+    write_pending_select(True)
+    return None
+
+  if command in selected_commands and not command_in_selected_scope(config):
+    return None
 
   if command == "ping" and parsed["target"] and parsed["target"] not in ["all", "*", node_name]:
     if parsed["args"]:
@@ -376,6 +599,14 @@ def handle_command(config, text):
   if command == "nodes":
     public_ip = get_public_ip()
     return f"[{node_name}] 在线\n公网 IP: {public_ip}"
+  if command == "disk":
+    return f"[{node_name}] 磁盘详情\n{get_disk_detail()}"
+  if command == "top":
+    return f"[{node_name}] 高占用进程\n{get_top_processes()}"
+  if command == "uptime":
+    return f"[{node_name}] 运行时间\n{get_uptime_status()}"
+  if command == "services":
+    return f"[{node_name}] 服务状态\n{get_services_status()}"
   return None
 
 
@@ -429,7 +660,7 @@ def listen(config):
         if str(chat.get("id")) != expected_chat_id:
           log(f"忽略消息: chat_id={chat.get('id')} 与配置 CHAT_ID={expected_chat_id} 不一致")
           continue
-        response = handle_command(config, text)
+        response = handle_command(config, text) if text.startswith("/") else handle_text(config, text)
         if response:
           send_message(config, response)
         else:
