@@ -214,19 +214,22 @@ def command_help_text():
     f"当前选择: {selected_scope_text()}",
     "支持命令:",
     "/select 选择 VPS 范围",
-    "/ping [目标]",
-    "/use",
-    "/speed",
-    "/status",
-    "/report",
-    "/disk",
-    "/top",
-    "/uptime",
-    "/services",
-    "/1 状态快捷指令",
-    "/2 流量快捷指令",
-    "/nodes",
-    "/help",
+    "/ping [目标] 测延迟，默认 1.1.1.1 和 8.8.8.8",
+    "/use 查看月流量和今日流量",
+    "/speed 执行网络测速",
+    "/status 查看 CPU/内存/磁盘/负载",
+    "/report 查看综合报告",
+    "/disk 查看磁盘详情",
+    "/top 查看高占用进程",
+    "/uptime 查看运行时间和负载",
+    "/services 查看关键服务状态",
+    "/nodes 查看当前节点在线信息",
+    "/help 显示本说明",
+    "",
+    "使用方式:",
+    "1. 发送 /select 选择 VPS 范围。",
+    "2. 按编号回复，例如 2,3；回复 99 选择全部；回复 0 清空选择。",
+    "3. 再发送 /use、/status、/speed 等命令，选中的 VPS 会分别返回结果。",
   ])
 
 
@@ -562,7 +565,7 @@ def handle_command(config, text):
   command = parsed["command"]
   args = parsed["args"]
   selected_commands = [
-    "ping", "speed", "sudu", "use", "status", "1", "report", "2",
+    "ping", "speed", "sudu", "use", "status", "report",
     "disk", "top", "uptime", "services",
   ]
 
@@ -592,9 +595,9 @@ def handle_command(config, text):
     return f"[{node_name}] 测速结果\n{run_speedtest()}"
   if command == "use":
     return f"[{node_name}] 流量使用情况\n{get_traffic_usage(config)}"
-  if command in ["status", "1"]:
+  if command == "status":
     return build_report(config, "状态")
-  if command in ["report", "2"]:
+  if command == "report":
     return build_report(config, "流量汇报")
   if command == "nodes":
     public_ip = get_public_ip()

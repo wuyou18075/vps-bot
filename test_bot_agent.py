@@ -82,6 +82,9 @@ class TelegramCommandTest(unittest.TestCase):
     self.assertIn("/ping", result)
     self.assertIn("/select", result)
     self.assertIn("/services", result)
+    self.assertIn("使用方式:", result)
+    self.assertNotIn("/1", result)
+    self.assertNotIn("/2", result)
 
   def test_ping_with_host_argument_runs_on_current_node(self):
     with mock.patch("bot_agent.run_ping", return_value="1.1.1.1: avg 10 ms"):
@@ -89,17 +92,12 @@ class TelegramCommandTest(unittest.TestCase):
 
     self.assertEqual("[vps-1] Ping 结果\n1.1.1.1: avg 10 ms", result)
 
-  def test_numeric_shortcut_one_returns_status(self):
-    with mock.patch("bot_agent.build_report", return_value="[vps-1] 状态"):
-      result = bot_agent.handle_command({"NODE_NAME": "vps-1"}, "/1")
+  def test_numeric_shortcuts_are_removed(self):
+    one = bot_agent.handle_command({"NODE_NAME": "vps-1"}, "/1")
+    two = bot_agent.handle_command({"NODE_NAME": "vps-1"}, "/2")
 
-    self.assertEqual("[vps-1] 状态", result)
-
-  def test_numeric_shortcut_two_returns_report(self):
-    with mock.patch("bot_agent.build_report", return_value="[vps-1] 流量汇报"):
-      result = bot_agent.handle_command({"NODE_NAME": "vps-1"}, "/2")
-
-    self.assertEqual("[vps-1] 流量汇报", result)
+    self.assertIsNone(one)
+    self.assertIsNone(two)
 
   def test_use_returns_traffic_usage_only(self):
     with mock.patch("bot_agent.get_traffic_usage", return_value="本月已用: 3.00 GB\n今日已用: 1.00 GB"):

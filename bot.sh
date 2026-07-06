@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-bot-panel}"
-SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.3}"
+SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.4}"
 RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 AGENT_URL="${BOT_PANEL_AGENT_URL:-${RAW_BASE_URL}/bot_agent.py}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -290,8 +290,6 @@ TG选择范围:$(get_selected_nodes_status)
 流量:    $(get_traffic_summary)
 TG状态:  $(get_telegram_status)
 
-TG指令说明:
-  /ping 延迟    /use 流量    /1 状态    /2 汇报
 ----------------------------------------
 1. 月流量监控
 2. 查看节点信息
@@ -692,19 +690,16 @@ Telegram 指令：
 /top
 /uptime
 /services
-/1
-/2
 /nodes
 /help
 
 说明：
-- /select 选择后续命令要执行的 VPS 范围。
+- /select 先选择 VPS 范围，例如回复 2,3 或 99。
 - /ping 测延迟。
 - /use 查看月流量和今日流量。
 - /speed 测速。
 - /disk 查看磁盘详情，/top 查看高占用进程。
 - /uptime 查看运行时间，/services 查看关键服务状态。
-- /1 等同 /status，/2 等同 /report。
 - 选择范围由 /select 控制；未选择时默认全部 VPS 响应。
 - 只处理配置的 Chat ID 发来的消息。
 EOF
