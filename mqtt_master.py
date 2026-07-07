@@ -255,6 +255,7 @@ def render_mosquitto_acl(topic_prefix, nodes):
       f"topic read {prefix}/commands/{node_id}",
       f"topic write {prefix}/nodes/{node_id}/status",
       f"topic write {prefix}/results/{node_id}",
+      f"topic write {prefix}/health/{node_id}",
       "",
     ])
   return "\n".join(lines).rstrip() + "\n"
@@ -288,6 +289,36 @@ def refresh_mqtt_auth(db, config):
     )
   subprocess.run(["systemctl", "restart", "mosquitto"], check=False, capture_output=True)
   return True
+
+
+def verify_node_mqtt_auth(config, node):
+  """Verify newly issued node credentials against the local broker."""
+  prefix = config.get("MQTT_TOPIC_PREFIX", DEFAULT_TOPIC_PREFIX).strip("/")
+  topic = f"{prefix}/health/{node['node_id']}"
+  payload = json.dumps({
+    "node_id": node["node_id"],
+    "ts": int(time.time()),
+    "check": "register",
+  }, ensure_ascii=False)
+  try:
+    result = subprocess.run(
+      [
+        "mosquitto_pub",
+        "-h", master_mqtt_host(config),
+        "-p", str(config.get("MQTT_PORT", "1883")),
+        "-u", node["mqtt_username"],
+        "-P", node["mqtt_password"],
+        "-t", topic,
+        "-m", payload,
+      ],
+      check=False,
+      capture_output=True,
+      text=True,
+      timeout=20,
+    )
+  except (FileNotFoundError, subprocess.TimeoutExpired):
+    return False
+  return result.returncode == 0
 
 
 def load_env(path=DEFAULT_CONFIG):
@@ -950,7 +981,13 @@ def register_node_from_agent(db, config, form):
   if existing_node_id:
     db.delete_node(existing_node_id)
   node = db.register_node(form.get("name", "vps"))
-  refresh_mqtt_auth(db, config)
+  if not refresh_mqtt_auth(db, config):
+    db.delete_node(node["node_id"])
+    raise RuntimeError("MQTT 账号刷新失败，请检查 mosquitto_passwd、ACL 路径和权限。")
+  if not verify_node_mqtt_auth(config, node):
+    db.delete_node(node["node_id"])
+    refresh_mqtt_auth(db, config)
+    raise RuntimeError("MQTT 节点账号验证失败，请检查 Mosquitto 是否已监听并加载最新 ACL。")
   return node
 
 
@@ -1815,7 +1852,16 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       self.send_response(403)
       self.end_headers()
       return
-    node = register_node_from_agent(self.db, self.config, form)
+    try:
+      node = register_node_from_agent(self.db, self.config, form)
+    except RuntimeError as error:
+      payload = json.dumps({"error": str(error)}, ensure_ascii=False).encode("utf-8")
+      self.send_response(503)
+      self.send_header("Content-Type", "application/json; charset=utf-8")
+      self.send_header("Content-Length", str(len(payload)))
+      self.end_headers()
+      self.wfile.write(payload)
+      return
     response = {
       **node,
       "mqtt_host": self.config.get("MQTT_HOST", "127.0.0.1"),
@@ -2103,7 +2149,10 @@ def build_aiohttp_app(db, config):
     form = await aiohttp_form(request)
     if not db.consume_registration_token(form.get("token", "")):
       return web.Response(status=403)
-    node = register_node_from_agent(db, config, form)
+    try:
+      node = register_node_from_agent(db, config, form)
+    except RuntimeError as error:
+      return web.json_response({"error": str(error)}, status=503)
     return web.json_response({
       **node,
       "mqtt_host": config.get("MQTT_HOST", "127.0.0.1"),

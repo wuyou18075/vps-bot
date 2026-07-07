@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import subprocess
@@ -56,7 +57,9 @@ class MqttSecurityTest(unittest.TestCase):
 
     self.assertIn("user vps_node_a", acl)
     self.assertIn("topic read vps-bot/commands/node-a", acl)
+    self.assertIn("topic write vps-bot/nodes/node-a/status", acl)
     self.assertIn("topic write vps-bot/results/node-a", acl)
+    self.assertIn("topic write vps-bot/health/node-a", acl)
     self.assertNotIn("topic read vps-bot/commands/node-b\nuser vps_node_a", acl)
     self.assertIn("user vps_master", acl)
     self.assertIn("topic readwrite vps-bot/#", acl)
@@ -560,15 +563,60 @@ class MqttSecurityTest(unittest.TestCase):
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
       old = db.register_node("old")
 
-      new = mqtt_master.register_node_from_agent(db, {}, {
-        "name": "new",
-        "existing_node_id": old["node_id"],
-      })
+      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=True):
+        with mock.patch("mqtt_master.verify_node_mqtt_auth", return_value=True):
+          new = mqtt_master.register_node_from_agent(db, {}, {
+            "name": "new",
+            "existing_node_id": old["node_id"],
+          })
 
       nodes = db.list_nodes()
 
     self.assertEqual([new["node_id"]], [node["node_id"] for node in nodes])
     self.assertEqual("new", nodes[0]["name"])
+
+  def test_register_node_fails_when_mqtt_refresh_fails(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+
+      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=False):
+        with self.assertRaises(RuntimeError):
+          mqtt_master.register_node_from_agent(db, {}, {"name": "broken"})
+      nodes = db.list_nodes()
+
+    self.assertEqual([], nodes)
+
+  def test_register_node_verifies_mqtt_credentials(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+
+      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=True):
+        with mock.patch("mqtt_master.verify_node_mqtt_auth", return_value=False) as verify:
+          with self.assertRaises(RuntimeError):
+            mqtt_master.register_node_from_agent(db, {}, {"name": "broken"})
+      nodes = db.list_nodes()
+
+    verify.assert_called_once()
+    self.assertEqual([], nodes)
+
+  def test_verify_node_mqtt_auth_uses_health_topic(self):
+    node = {
+      "node_id": "node-a",
+      "mqtt_username": "u",
+      "mqtt_password": "p",
+    }
+
+    with mock.patch("mqtt_master.subprocess.run") as run:
+      run.return_value.returncode = 0
+      ok = mqtt_master.verify_node_mqtt_auth({
+        "MQTT_TOPIC_PREFIX": "vps-bot",
+        "MQTT_PORT": "1883",
+      }, node)
+
+    command = run.call_args.args[0]
+    self.assertTrue(ok)
+    self.assertIn("vps-bot/health/node-a", command)
+    self.assertIn("u", command)
 
   def test_refresh_mqtt_auth_writes_node_credentials(self):
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -761,6 +809,23 @@ class MqttSecurityTest(unittest.TestCase):
       saved = mqtt_agent.load_env(config)
 
     self.assertEqual("127.0.0.1", saved["MQTT_HOST"])
+
+  def test_agent_registration_surfaces_master_error_message(self):
+    body = io.BytesIO(json.dumps({"error": "MQTT 节点账号验证失败"}).encode("utf-8"))
+    error = mqtt_agent.urllib.error.HTTPError(
+      "http://master/api/register",
+      503,
+      "Service Unavailable",
+      {},
+      body,
+    )
+
+    with mock.patch("mqtt_agent.urllib.request.urlopen", side_effect=error):
+      try:
+        with self.assertRaisesRegex(RuntimeError, "MQTT 节点账号验证失败"):
+          mqtt_agent.register_agent("http://master", "token", "new", "/tmp/agent.env")
+      finally:
+        error.close()
 
   def test_agent_listen_starts_periodic_status_heartbeat(self):
     config = {

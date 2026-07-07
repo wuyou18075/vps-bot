@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -505,8 +506,16 @@ def register_agent(master_url, token, node_name, config_path=DEFAULT_CONFIG):
     "existing_node_id": existing.get("NODE_ID", ""),
   }).encode("utf-8")
   request = urllib.request.Request(f"{master_url.rstrip('/')}/api/register", data=data)
-  with urllib.request.urlopen(request, timeout=30) as response:
-    payload = json.loads(response.read().decode("utf-8"))
+  try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+      payload = json.loads(response.read().decode("utf-8"))
+  except urllib.error.HTTPError as error:
+    detail = error.read().decode("utf-8", errors="replace")
+    try:
+      message = json.loads(detail).get("error") or detail
+    except json.JSONDecodeError:
+      message = detail or str(error)
+    raise RuntimeError(f"注册失败: {message}") from error
   write_env(config_path, {
     "NODE_ID": payload["node_id"],
     "NODE_NAME": payload["name"],
