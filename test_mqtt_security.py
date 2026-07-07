@@ -564,7 +564,7 @@ class MqttSecurityTest(unittest.TestCase):
       old = db.register_node("old")
 
       with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=True):
-        with mock.patch("mqtt_master.verify_node_mqtt_auth", return_value=True):
+        with mock.patch("mqtt_master.verify_node_mqtt_auth", return_value=(True, "")):
           new = mqtt_master.register_node_from_agent(db, {}, {
             "name": "new",
             "existing_node_id": old["node_id"],
@@ -591,8 +591,8 @@ class MqttSecurityTest(unittest.TestCase):
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
 
       with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=True):
-        with mock.patch("mqtt_master.verify_node_mqtt_auth", return_value=False) as verify:
-          with self.assertRaises(RuntimeError):
+        with mock.patch("mqtt_master.verify_node_mqtt_auth", return_value=(False, "not authorised")) as verify:
+          with self.assertRaisesRegex(RuntimeError, "not authorised"):
             mqtt_master.register_node_from_agent(db, {}, {"name": "broken"})
       nodes = db.list_nodes()
 
@@ -608,15 +608,35 @@ class MqttSecurityTest(unittest.TestCase):
 
     with mock.patch("mqtt_master.subprocess.run") as run:
       run.return_value.returncode = 0
-      ok = mqtt_master.verify_node_mqtt_auth({
+      ok, detail = mqtt_master.verify_node_mqtt_auth({
         "MQTT_TOPIC_PREFIX": "vps-bot",
         "MQTT_PORT": "1883",
       }, node)
 
     command = run.call_args.args[0]
     self.assertTrue(ok)
+    self.assertEqual("", detail)
     self.assertIn("vps-bot/health/node-a", command)
     self.assertIn("u", command)
+
+  def test_verify_node_mqtt_auth_returns_failure_detail(self):
+    node = {
+      "node_id": "node-a",
+      "mqtt_username": "u",
+      "mqtt_password": "p",
+    }
+    result = subprocess.CompletedProcess(
+      args=["mosquitto_pub"],
+      returncode=5,
+      stdout="",
+      stderr="Connection Refused: not authorised.",
+    )
+
+    with mock.patch("mqtt_master.subprocess.run", return_value=result):
+      ok, detail = mqtt_master.verify_node_mqtt_auth({}, node, attempts=1)
+
+    self.assertFalse(ok)
+    self.assertIn("not authorised", detail)
 
   def test_refresh_mqtt_auth_writes_node_credentials(self):
     with tempfile.TemporaryDirectory() as temp_dir:

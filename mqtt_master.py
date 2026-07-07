@@ -291,7 +291,7 @@ def refresh_mqtt_auth(db, config):
   return True
 
 
-def verify_node_mqtt_auth(config, node):
+def verify_node_mqtt_auth(config, node, attempts=5, delay_seconds=1):
   """Verify newly issued node credentials against the local broker."""
   prefix = config.get("MQTT_TOPIC_PREFIX", DEFAULT_TOPIC_PREFIX).strip("/")
   topic = f"{prefix}/health/{node['node_id']}"
@@ -300,25 +300,35 @@ def verify_node_mqtt_auth(config, node):
     "ts": int(time.time()),
     "check": "register",
   }, ensure_ascii=False)
-  try:
-    result = subprocess.run(
-      [
-        "mosquitto_pub",
-        "-h", master_mqtt_host(config),
-        "-p", str(config.get("MQTT_PORT", "1883")),
-        "-u", node["mqtt_username"],
-        "-P", node["mqtt_password"],
-        "-t", topic,
-        "-m", payload,
-      ],
-      check=False,
-      capture_output=True,
-      text=True,
-      timeout=20,
-    )
-  except (FileNotFoundError, subprocess.TimeoutExpired):
-    return False
-  return result.returncode == 0
+  last_error = ""
+  for attempt in range(max(1, attempts)):
+    try:
+      result = subprocess.run(
+        [
+          "mosquitto_pub",
+          "-h", master_mqtt_host(config),
+          "-p", str(config.get("MQTT_PORT", "1883")),
+          "-u", node["mqtt_username"],
+          "-P", node["mqtt_password"],
+          "-t", topic,
+          "-m", payload,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+      )
+    except FileNotFoundError:
+      return False, "mosquitto_pub 未安装或不可执行"
+    except subprocess.TimeoutExpired:
+      last_error = "mosquitto_pub 执行超时"
+    else:
+      if result.returncode == 0:
+        return True, ""
+      last_error = (result.stderr or result.stdout or f"mosquitto_pub exit {result.returncode}").strip()
+    if attempt < max(1, attempts) - 1:
+      time.sleep(delay_seconds)
+  return False, last_error
 
 
 def load_env(path=DEFAULT_CONFIG):
@@ -984,10 +994,12 @@ def register_node_from_agent(db, config, form):
   if not refresh_mqtt_auth(db, config):
     db.delete_node(node["node_id"])
     raise RuntimeError("MQTT 账号刷新失败，请检查 mosquitto_passwd、ACL 路径和权限。")
-  if not verify_node_mqtt_auth(config, node):
+  ok, detail = verify_node_mqtt_auth(config, node)
+  if not ok:
     db.delete_node(node["node_id"])
     refresh_mqtt_auth(db, config)
-    raise RuntimeError("MQTT 节点账号验证失败，请检查 Mosquitto 是否已监听并加载最新 ACL。")
+    suffix = f"最近错误：{detail}" if detail else "无详细错误。"
+    raise RuntimeError(f"MQTT 节点账号验证失败，请检查 Mosquitto 是否已监听并加载最新 ACL。{suffix}")
   return node
 
 
