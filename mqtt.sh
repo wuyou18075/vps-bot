@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.31}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.32}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 VPS_MQTT_FORCE_REMOTE="${VPS_MQTT_FORCE_REMOTE:-1}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
@@ -737,14 +737,24 @@ restart_services() {
   pause
 }
 
+uninstall_mosquitto_packages() {
+  systemctl disable --now mosquitto >/dev/null 2>&1 || true
+  if ! command -v apt-get >/dev/null 2>&1; then
+    yellow "未找到 apt-get，已跳过 Mosquitto 软件包卸载。"
+    return
+  fi
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y mosquitto mosquitto-clients >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >/dev/null 2>&1 || true
+}
+
 uninstall_all() {
   require_root
   systemctl disable --now "${PANEL_NAME}-master.service" >/dev/null 2>&1 || true
   systemctl disable --now "${PANEL_NAME}-agent.service" >/dev/null 2>&1 || true
   rm -f "${SERVICE_FILE}" "${AGENT_SERVICE_FILE}" "${NGINX_LINK}" "${NGINX_FILE}" "${MOSQUITTO_CONF}" "${MOSQUITTO_ACL}" "${MOSQUITTO_PASSWD}"
-  rm -rf "${INSTALL_DIR}" "${CONFIG_DIR}" "${STATE_DIR}"
+  rm -rf "${INSTALL_DIR}" "${CONFIG_DIR}" "${STATE_DIR}" "${MOSQUITTO_PERSIST_DIR}"
+  uninstall_mosquitto_packages
   systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl restart mosquitto >/dev/null 2>&1 || true
   green "已卸载 VPS MQTT 监控服务。"
   pause
 }

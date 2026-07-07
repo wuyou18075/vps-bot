@@ -302,6 +302,51 @@ EOF
     self.assertIn("restart mosquitto", output)
     self.assertIn("restart vps-mqtt-master.service", output)
 
+  def test_uninstall_all_purges_mosquitto_packages_and_state(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      suffix="$$"
+      CONFIG_DIR="/tmp/vps-mqtt-uninstall-config-${suffix}"
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      INSTALL_DIR="/tmp/vps-mqtt-uninstall-install-${suffix}"
+      STATE_DIR="/tmp/vps-mqtt-uninstall-state-${suffix}"
+      SERVICE_FILE="/tmp/vps-mqtt-uninstall-${suffix}.service"
+      AGENT_SERVICE_FILE="/tmp/vps-mqtt-uninstall-agent-${suffix}.service"
+      NGINX_FILE="/tmp/vps-mqtt-uninstall-nginx-${suffix}.conf"
+      NGINX_LINK="/tmp/vps-mqtt-uninstall-nginx-${suffix}.link"
+      MOSQUITTO_CONF="/tmp/vps-mqtt-uninstall-mosquitto-${suffix}.conf"
+      MOSQUITTO_ACL="/tmp/vps-mqtt-uninstall-${suffix}.acl"
+      MOSQUITTO_PASSWD="/tmp/vps-mqtt-uninstall-${suffix}.passwd"
+      MOSQUITTO_PERSIST_DIR="/tmp/vps-mqtt-uninstall-persist-${suffix}"
+      mkdir -p "${CONFIG_DIR}" "${INSTALL_DIR}" "${STATE_DIR}" "${MOSQUITTO_PERSIST_DIR}"
+      touch "${SERVICE_FILE}" "${AGENT_SERVICE_FILE}" "${NGINX_FILE}" "${NGINX_LINK}"
+      touch "${MOSQUITTO_CONF}" "${MOSQUITTO_ACL}" "${MOSQUITTO_PASSWD}"
+      systemctl() { printf '%s\\n' "$*" >> "/tmp/vps-mqtt-uninstall-systemctl-${suffix}.log"; }
+      apt-get() { printf '%s\\n' "$*" >> "/tmp/vps-mqtt-uninstall-apt-${suffix}.log"; }
+      command() {
+        if [ "$1" = "-v" ] && [ "$2" = "apt-get" ]; then
+          return 0
+        fi
+        builtin command "$@"
+      }
+      pause() { :; }
+      uninstall_all
+      cat "/tmp/vps-mqtt-uninstall-systemctl-${suffix}.log"
+      printf '%s\\n' '---APT---'
+      cat "/tmp/vps-mqtt-uninstall-apt-${suffix}.log"
+      printf '%s\\n' '---LEFT---'
+      [ ! -e "${MOSQUITTO_CONF}" ] && printf '%s\\n' conf-removed
+      [ ! -e "${MOSQUITTO_PERSIST_DIR}" ] && printf '%s\\n' persist-removed
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("disable --now mosquitto", output)
+    self.assertIn("purge -y mosquitto mosquitto-clients", output)
+    self.assertIn("autoremove -y", output)
+    self.assertIn("conf-removed", output)
+    self.assertIn("persist-removed", output)
+
   def test_repair_master_reports_mosquitto_config_diagnostics(self):
     script = textwrap.dedent("""
       VPS_MQTT_TESTING=1 source ./mqtt.sh
