@@ -202,6 +202,26 @@ EOF
     self.assertIn('PUBLIC_URL="http://5.6.7.8:9090"', output)
     self.assertIn('WEB_HOST="0.0.0.0"', output)
 
+  def test_deploy_web_restarts_master_service_after_copying_files(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      INSTALL_DIR=/tmp/vps-mqtt-deploy-web
+      CONFIG_DIR=/tmp/vps-mqtt-deploy-config
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      NGINX_FILE=/tmp/vps-mqtt-deploy-nginx.conf
+      NGINX_LINK=/tmp/vps-mqtt-deploy-nginx.link
+      SYSTEMCTL_LOG=/tmp/vps-mqtt-deploy-systemctl.log
+      rm -f "${SYSTEMCTL_LOG}"
+      pause() { :; }
+      systemctl() { printf '%s\\n' "$*" >> "${SYSTEMCTL_LOG}"; }
+      deploy_web
+      cat "${SYSTEMCTL_LOG}"
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("restart vps-mqtt-master.service", output)
+
   def test_setup_master_rejects_mismatched_admin_passwords(self):
     script = textwrap.dedent("""
       VPS_MQTT_TESTING=1 source ./mqtt.sh

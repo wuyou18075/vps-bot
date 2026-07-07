@@ -498,6 +498,35 @@ class MqttSecurityTest(unittest.TestCase):
     commands = [call.args[0] for call in run.call_args_list]
     self.assertIn(["systemctl", "restart", "mosquitto"], commands)
 
+  def test_refresh_mqtt_auth_uses_default_paths_for_upgraded_installs(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+      acl = os.path.join(temp_dir, "vps-mqtt.acl")
+      passwd = os.path.join(temp_dir, "vps-mqtt.passwd")
+
+      with mock.patch.object(mqtt_master, "DEFAULT_MOSQUITTO_ACL", acl):
+        with mock.patch.object(mqtt_master, "DEFAULT_MOSQUITTO_PASSWD", passwd):
+          with mock.patch("mqtt_master.subprocess.run"):
+            refreshed = mqtt_master.refresh_mqtt_auth(db, {})
+
+      with open(acl, "r", encoding="utf-8") as file:
+        acl_text = file.read()
+
+    self.assertTrue(refreshed)
+    self.assertIn(f"topic read vps-bot/commands/{node['node_id']}", acl_text)
+
+  def test_runtime_config_merges_persisted_settings(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.set_setting("MQTT_MASTER_PASSWORD", "persisted")
+      db.set_setting("MQTT_HOST", "10.0.0.1")
+
+      config = mqtt_master.runtime_config(db, {"MQTT_HOST": "127.0.0.1"})
+
+    self.assertEqual("127.0.0.1", config["MQTT_HOST"])
+    self.assertEqual("persisted", config["MQTT_MASTER_PASSWORD"])
+
   def test_delete_node_dispatches_uninstall_before_removing_record(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))

@@ -26,6 +26,21 @@ APP_NAME = "vps-mqtt"
 DEFAULT_CONFIG = "/etc/vps-mqtt/config.env"
 DEFAULT_DB = "/var/lib/vps-mqtt/master.db"
 DEFAULT_TOPIC_PREFIX = "vps-bot"
+DEFAULT_MOSQUITTO_ACL = "/etc/mosquitto/vps-mqtt.acl"
+DEFAULT_MOSQUITTO_PASSWD = "/etc/mosquitto/vps-mqtt.passwd"
+RUNTIME_SETTING_KEYS = [
+  "PUBLIC_URL",
+  "RAW_BASE_URL",
+  "MQTT_HOST",
+  "MQTT_PORT",
+  "MQTT_TOPIC_PREFIX",
+  "MQTT_MASTER_USER",
+  "MQTT_MASTER_PASSWORD",
+  "MOSQUITTO_ACL",
+  "MOSQUITTO_PASSWD",
+  "WEB_HOST",
+  "WEB_PORT",
+]
 ALLOWED_COMMANDS = {
   "ping",
   "use",
@@ -230,18 +245,19 @@ def render_mosquitto_acl(topic_prefix, nodes):
 
 def refresh_mqtt_auth(db, config):
   """Rewrite Mosquitto password and ACL files from registered nodes."""
-  acl_path = config.get("MOSQUITTO_ACL", "")
-  passwd_path = config.get("MOSQUITTO_PASSWD", "")
-  if not acl_path or not passwd_path:
-    return False
-  os.makedirs(os.path.dirname(acl_path), mode=0o755, exist_ok=True)
-  os.makedirs(os.path.dirname(passwd_path), mode=0o755, exist_ok=True)
+  acl_path = config.get("MOSQUITTO_ACL", "") or DEFAULT_MOSQUITTO_ACL
+  passwd_path = config.get("MOSQUITTO_PASSWD", "") or DEFAULT_MOSQUITTO_PASSWD
   nodes = db.list_nodes()
-  with open(acl_path, "w", encoding="utf-8") as file:
-    file.write(render_mosquitto_acl(config.get("MQTT_TOPIC_PREFIX", DEFAULT_TOPIC_PREFIX), nodes))
-  open(passwd_path, "w", encoding="utf-8").close()
-  os.chmod(acl_path, 0o600)
-  os.chmod(passwd_path, 0o600)
+  try:
+    os.makedirs(os.path.dirname(acl_path), mode=0o755, exist_ok=True)
+    os.makedirs(os.path.dirname(passwd_path), mode=0o755, exist_ok=True)
+    with open(acl_path, "w", encoding="utf-8") as file:
+      file.write(render_mosquitto_acl(config.get("MQTT_TOPIC_PREFIX", DEFAULT_TOPIC_PREFIX), nodes))
+    open(passwd_path, "w", encoding="utf-8").close()
+    os.chmod(acl_path, 0o600)
+    os.chmod(passwd_path, 0o600)
+  except OSError:
+    return False
   users = [(
     config.get("MQTT_MASTER_USER", "vps_master"),
     config.get("MQTT_MASTER_PASSWORD", ""),
@@ -269,6 +285,19 @@ def load_env(path=DEFAULT_CONFIG):
         continue
       key, value = line.split("=", 1)
       config[key.strip()] = value.strip().strip('"').strip("'")
+  return config
+
+
+def runtime_config(db, file_config):
+  """Merge file config with DB-persisted runtime settings for upgraded installs."""
+  config = dict(file_config)
+  for key in RUNTIME_SETTING_KEYS:
+    if not config.get(key):
+      value = db.get_setting(key, "")
+      if value:
+        config[key] = value
+  config.setdefault("MOSQUITTO_ACL", DEFAULT_MOSQUITTO_ACL)
+  config.setdefault("MOSQUITTO_PASSWD", DEFAULT_MOSQUITTO_PASSWD)
   return config
 
 
@@ -1648,6 +1677,7 @@ def serve(config_path=DEFAULT_CONFIG, db_path=DEFAULT_DB):
   """Run the master web server."""
   config = load_env(config_path)
   db = MasterDatabase(db_path)
+  config = runtime_config(db, config)
   host = config.get("WEB_HOST", "127.0.0.1")
   port = int(config.get("WEB_PORT", "8088"))
   server = MasterHTTPServer((host, port), MasterRequestHandler, db, config)
