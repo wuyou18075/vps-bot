@@ -177,6 +177,23 @@ class MqttSecurityTest(unittest.TestCase):
 
     self.assertIn("VpsMqttMaster", version)
 
+  def test_session_cookie_omits_secure_on_plain_http(self):
+    handler = object.__new__(mqtt_master.MasterRequestHandler)
+    handler.headers = {"X-Forwarded-Proto": "http"}
+
+    cookie = handler.build_session_cookie("session-token")
+
+    self.assertIn("HttpOnly", cookie)
+    self.assertNotIn("; Secure", cookie)
+
+  def test_session_cookie_keeps_secure_on_https(self):
+    handler = object.__new__(mqtt_master.MasterRequestHandler)
+    handler.headers = {"X-Forwarded-Proto": "https"}
+
+    cookie = handler.build_session_cookie("session-token")
+
+    self.assertIn("; Secure", cookie)
+
 
 if __name__ == "__main__":
   unittest.main()

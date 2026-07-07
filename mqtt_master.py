@@ -754,6 +754,16 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(payload)
 
+  def is_https_request(self):
+    """Return whether the original request used HTTPS."""
+    return (self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+            or self.headers.get("X-Forwarded-Ssl", "").lower() == "on")
+
+  def build_session_cookie(self, session):
+    """Build a session cookie suitable for HTTP or HTTPS deployments."""
+    secure = "; Secure" if self.is_https_request() else ""
+    return f"session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400{secure}"
+
   def redirect(self, path):
     """Redirect to path."""
     self.send_response(303)
@@ -902,10 +912,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     session = self.db.create_session(username)
     self.send_response(303)
     self.send_header("Location", "/")
-    self.send_header(
-      "Set-Cookie",
-      f"session={session}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400",
-    )
+    self.send_header("Set-Cookie", self.build_session_cookie(session))
     self.end_headers()
 
   def render_dashboard(self, user):
