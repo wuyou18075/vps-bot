@@ -72,6 +72,22 @@ class MqttShellTest(unittest.TestCase):
     self.assertIn("Web面板: 运行 (http://1.2.3.4:8088)", output)
     self.assertIn("公网访问: http://1.2.3.4:8088", output)
 
+  def test_primary_ip_prefers_public_ip_lookup(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      curl() {
+        printf '%s\\n' '8.8.8.8'
+      }
+      hostname() {
+        if [ "$1" = "-I" ]; then
+          printf '%s\\n' '172.26.3.247'
+        fi
+      }
+      get_primary_ip
+    """)
+
+    self.assertEqual("8.8.8.8", self.run_bash(script))
+
   def test_setup_master_writes_secure_config_and_services(self):
     script = textwrap.dedent("""
       VPS_MQTT_TESTING=1 source ./mqtt.sh
@@ -105,6 +121,7 @@ EOF
     self.assertIn('PUBLIC_URL="https://panel.example.com"', output)
     self.assertIn('MQTT_PORT="1883"', output)
     self.assertIn('WEB_PORT="8088"', output)
+    self.assertIn('WEB_HOST="127.0.0.1"', output)
     self.assertIn("ExecStart=/usr/bin/python3 /tmp/vps-mqtt-test-install/mqtt_master.py --config /tmp/vps-mqtt-test-config/config.env serve", output)
     self.assertIn("password_file /tmp/vps-mqtt-passwd", output)
     self.assertIn("acl_file /tmp/vps-mqtt-acl", output)
@@ -137,6 +154,7 @@ EOF
     output = self.run_bash(script)
 
     self.assertIn('PUBLIC_URL="http://5.6.7.8:9090"', output)
+    self.assertIn('WEB_HOST="0.0.0.0"', output)
 
   def test_register_agent_invokes_agent_and_service_setup(self):
     script = textwrap.dedent("""

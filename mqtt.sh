@@ -224,7 +224,15 @@ get_web_status() {
 
 get_primary_ip() {
   local ip=""
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if command -v curl >/dev/null 2>&1; then
+    ip="$(curl -fsSL --connect-timeout 3 https://api.ipify.org 2>/dev/null || true)"
+    if [ -z "${ip}" ]; then
+      ip="$(curl -fsSL --connect-timeout 3 https://ifconfig.me/ip 2>/dev/null || true)"
+    fi
+  fi
+  if [ -z "${ip}" ]; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
   if [ -z "${ip}" ] && command -v ip >/dev/null 2>&1; then
     ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')"
   fi
@@ -386,21 +394,26 @@ setup_master() {
   load_config
 
   local public_url
+  local public_url_input
   local mqtt_port
   local web_port
-  read -r -p "请输入 Web 公网地址，例如 https://panel.example.com [${PUBLIC_URL:-}]: " public_url
+  read -r -p "请输入 Web 公网地址，例如 https://panel.example.com；无域名直接回车使用 IP:端口 [${PUBLIC_URL:-}]: " public_url_input
   read -r -p "请输入 MQTT 端口 [${MQTT_PORT:-1883}]: " mqtt_port
   mqtt_port="${mqtt_port:-${MQTT_PORT:-1883}}"
   read -r -p "请输入 Web 本地端口 [${WEB_PORT:-8088}]: " web_port
   web_port="${web_port:-${WEB_PORT:-8088}}"
-  public_url="${public_url:-${PUBLIC_URL:-http://$(get_primary_ip):${web_port}}}"
+  public_url="${public_url_input:-${PUBLIC_URL:-http://$(get_primary_ip):${web_port}}}"
 
   write_config_value "PUBLIC_URL" "${public_url}"
   write_config_value "RAW_BASE_URL" "${RAW_BASE_URL}"
   write_config_value "MQTT_HOST" "$(get_primary_ip)"
   write_config_value "MQTT_PORT" "${mqtt_port}"
   write_config_value "MQTT_TOPIC_PREFIX" "${MQTT_TOPIC_PREFIX:-vps-bot}"
-  write_config_value "WEB_HOST" "127.0.0.1"
+  if [ -z "${public_url_input}" ] && [[ "${public_url}" == http://*:* ]]; then
+    write_config_value "WEB_HOST" "0.0.0.0"
+  else
+    write_config_value "WEB_HOST" "127.0.0.1"
+  fi
   write_config_value "WEB_PORT" "${web_port}"
 
   load_config
