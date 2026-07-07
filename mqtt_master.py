@@ -12,6 +12,7 @@ import http.cookies
 import http.server
 import json
 import os
+import pwd
 import secrets
 import socket
 import sqlite3
@@ -272,8 +273,7 @@ def refresh_mqtt_auth(db, config):
     with open(acl_path, "w", encoding="utf-8") as file:
       file.write(render_mosquitto_acl(config.get("MQTT_TOPIC_PREFIX", DEFAULT_TOPIC_PREFIX), nodes))
     open(passwd_path, "w", encoding="utf-8").close()
-    os.chmod(acl_path, 0o600)
-    os.chmod(passwd_path, 0o600)
+    set_mosquitto_file_permissions(acl_path, passwd_path)
   except OSError:
     return False
   users = [(
@@ -281,14 +281,40 @@ def refresh_mqtt_auth(db, config):
     config.get("MQTT_MASTER_PASSWORD", ""),
   )]
   users.extend((node["mqtt_username"], node["mqtt_password"]) for node in nodes)
-  for username, password in users:
-    subprocess.run(
-      ["mosquitto_passwd", "-b", passwd_path, username, password],
+  for index, (username, password) in enumerate(users):
+    command = ["mosquitto_passwd", "-b"]
+    if index == 0:
+      command.append("-c")
+    command.extend([passwd_path, username, password])
+    result = subprocess.run(
+      command,
       check=False,
       capture_output=True,
     )
-  subprocess.run(["systemctl", "restart", "mosquitto"], check=False, capture_output=True)
+    if command_failed(result):
+      return False
+  restart = subprocess.run(["systemctl", "restart", "mosquitto"], check=False, capture_output=True)
+  if command_failed(restart):
+    return False
   return True
+
+
+def command_failed(result):
+  """Return whether a subprocess result definitely failed."""
+  returncode = getattr(result, "returncode", 0)
+  return isinstance(returncode, int) and returncode != 0
+
+
+def set_mosquitto_file_permissions(*paths):
+  """Make Mosquitto auth files readable by the broker without making them public."""
+  try:
+    mosquitto = pwd.getpwnam("mosquitto")
+  except KeyError:
+    mosquitto = None
+  for path in paths:
+    os.chmod(path, 0o640)
+    if mosquitto:
+      os.chown(path, 0, mosquitto.pw_gid)
 
 
 def verify_node_mqtt_auth(config, node, attempts=5, delay_seconds=1):

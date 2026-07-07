@@ -661,6 +661,21 @@ class MqttSecurityTest(unittest.TestCase):
     called_users = [call.args[0][-2] for call in run.call_args_list]
     self.assertIn("vps_master", called_users)
     self.assertIn(node["mqtt_username"], called_users)
+    self.assertIn("-c", run.call_args_list[0].args[0])
+    self.assertNotIn("-c", run.call_args_list[1].args[0])
+
+  def test_refresh_mqtt_auth_fails_when_passwd_command_fails(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+
+      with mock.patch("mqtt_master.subprocess.run") as run:
+        run.return_value.returncode = 1
+        ok = mqtt_master.refresh_mqtt_auth(db, {
+          "MOSQUITTO_ACL": os.path.join(temp_dir, "acl"),
+          "MOSQUITTO_PASSWD": os.path.join(temp_dir, "passwd"),
+        })
+
+    self.assertFalse(ok)
 
   def test_refresh_mqtt_auth_restarts_mosquitto_after_credentials_change(self):
     with tempfile.TemporaryDirectory() as temp_dir:

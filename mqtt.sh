@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.25}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.26}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -431,8 +431,11 @@ topic readwrite ${MQTT_TOPIC_PREFIX:-vps-bot}/#
 EOF
 
   touch "${MOSQUITTO_PASSWD}"
-  chmod 600 "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}"
-  mosquitto_passwd -b "${MOSQUITTO_PASSWD}" vps_master "${master_password}" >/dev/null
+  chmod 640 "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}"
+  if id mosquitto >/dev/null 2>&1; then
+    chown root:mosquitto "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}" 2>/dev/null || true
+  fi
+  mosquitto_passwd -b -c "${MOSQUITTO_PASSWD}" vps_master "${master_password}" >/dev/null
 }
 
 write_master_service() {

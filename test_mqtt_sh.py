@@ -168,6 +168,16 @@ EOF
     self.assertIn("admin:admin", output)
     self.assertIn("health-ok", output)
 
+  def test_mosquitto_password_file_is_created_and_readable_by_broker(self):
+    with open("mqtt.sh", "r", encoding="utf-8") as file:
+      script = file.read()
+
+    write_body = script.split("write_mosquitto_files() {", 1)[1].split("write_master_service()", 1)[0]
+
+    self.assertIn("chmod 640", write_body)
+    self.assertIn("chown root:mosquitto", write_body)
+    self.assertIn("mosquitto_passwd -b -c", write_body)
+
   def test_setup_master_defaults_public_url_to_ip_port(self):
     script = textwrap.dedent("""
       VPS_MQTT_TESTING=1 source ./mqtt.sh
