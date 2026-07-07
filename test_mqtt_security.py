@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -785,6 +786,48 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertEqual(2, publish.call_count)
     self.assertIn("nodes/node/status", publish.call_args_list[0].args[1])
     self.assertIn("results/node", publish.call_args_list[1].args[1])
+
+  def test_agent_startup_snapshot_retries_transient_mqtt_failures(self):
+    config = {
+      "NODE_ID": "node",
+      "NODE_NAME": "test7",
+      "MQTT_HOST": "127.0.0.1",
+      "MQTT_USERNAME": "u",
+      "MQTT_PASSWORD": "p",
+      "COMMAND_SECRET": "s",
+    }
+
+    with mock.patch("mqtt_agent.collect_snapshot_metrics") as collect:
+      collect.return_value = {
+        "monthly_used_gb": 1.0,
+        "daily_used_gb": 0.1,
+        "network_rx_mbps": 2.0,
+        "network_tx_mbps": 3.0,
+        "cpu_percent": 4.0,
+        "memory_percent": 5.0,
+        "latency_ms": 6.0,
+      }
+      with mock.patch("mqtt_agent.mqtt_publish", side_effect=[False, False, True, True]) as publish:
+        with mock.patch("mqtt_agent.time.sleep") as sleep:
+          ok = mqtt_agent.publish_startup_snapshot(config, attempts=2, delay_seconds=1)
+
+    self.assertTrue(ok)
+    self.assertEqual(4, publish.call_count)
+    sleep.assert_called_once_with(1)
+
+  def test_mqtt_publish_records_failure_details(self):
+    result = subprocess.CompletedProcess(
+      args=["mosquitto_pub"],
+      returncode=5,
+      stdout="",
+      stderr="Connection Refused: not authorised.",
+    )
+
+    with mock.patch("mqtt_agent.subprocess.run", return_value=result):
+      ok = mqtt_agent.mqtt_publish({}, "topic", "payload")
+
+    self.assertFalse(ok)
+    self.assertIn("not authorised", mqtt_agent.mqtt_publish_error())
 
   def test_agent_uninstall_command_schedules_cleanup(self):
     with mock.patch("mqtt_agent.delayed_cleanup_agent") as cleanup:

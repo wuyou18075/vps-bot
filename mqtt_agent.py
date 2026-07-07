@@ -19,6 +19,7 @@ import mqtt_master
 
 
 DEFAULT_CONFIG = "/etc/vps-mqtt/agent.env"
+LAST_MQTT_ERROR = ""
 ALLOWED_COMMANDS = {
   "ping",
   "use",
@@ -300,8 +301,15 @@ def mqtt_topic(config, suffix):
   return f"{prefix}/{suffix.strip('/')}"
 
 
+def mqtt_publish_error():
+  """Return the last mosquitto_pub error without exposing credentials."""
+  return LAST_MQTT_ERROR
+
+
 def mqtt_publish(config, topic, payload, retain=False):
   """Publish an MQTT payload."""
+  global LAST_MQTT_ERROR
+  LAST_MQTT_ERROR = ""
   command = ["mosquitto_pub", *mqtt_base_args(config), "-t", topic, "-m", payload]
   if retain:
     command.append("-r")
@@ -313,9 +321,16 @@ def mqtt_publish(config, topic, payload, retain=False):
       check=False,
       timeout=20,
     )
-  except (FileNotFoundError, subprocess.TimeoutExpired):
+  except FileNotFoundError:
+    LAST_MQTT_ERROR = "mosquitto_pub 未安装或不可执行"
     return False
-  return result.returncode == 0
+  except subprocess.TimeoutExpired:
+    LAST_MQTT_ERROR = "mosquitto_pub 执行超时"
+    return False
+  if result.returncode == 0:
+    return True
+  LAST_MQTT_ERROR = (result.stderr or result.stdout or f"mosquitto_pub exit {result.returncode}").strip()
+  return False
 
 
 def cleanup_agent_install(config):
@@ -398,17 +413,22 @@ def command_result_payload(config, result, fallback_command):
   }, ensure_ascii=False)
 
 
-def publish_startup_snapshot(config):
+def publish_startup_snapshot(config, attempts=5, delay_seconds=2):
   """Publish an immediate heartbeat and metrics sample after registration/startup."""
   node_id = config["NODE_ID"]
-  status_ok = publish_status(config)
-  result = execute_allowed_command(config, "/snapshot")
-  snapshot_ok = mqtt_publish(
-    config,
-    mqtt_topic(config, f"results/{node_id}"),
-    command_result_payload(config, result, "snapshot"),
-  )
-  return bool(status_ok and snapshot_ok)
+  for attempt in range(max(1, attempts)):
+    status_ok = publish_status(config)
+    result = execute_allowed_command(config, "/snapshot")
+    snapshot_ok = mqtt_publish(
+      config,
+      mqtt_topic(config, f"results/{node_id}"),
+      command_result_payload(config, result, "snapshot"),
+    )
+    if status_ok and snapshot_ok:
+      return True
+    if attempt < max(1, attempts) - 1:
+      time.sleep(delay_seconds)
+  return False
 
 
 def status_heartbeat_loop(config, interval_seconds=60):
@@ -518,7 +538,13 @@ def main():
   if args.command == "startup-check":
     config = load_env(args.config)
     ok = publish_startup_snapshot(config)
-    print("MQTT 自检通过，已发送心跳和实时指标。" if ok else "MQTT 自检失败，未能发送心跳或实时指标。")
+    if ok:
+      print("MQTT 自检通过，已发送心跳和实时指标。")
+    else:
+      print("MQTT 自检失败，未能发送心跳或实时指标。")
+      print(f"MQTT 连接: {config.get('MQTT_HOST', '127.0.0.1')}:{config.get('MQTT_PORT', '1883')}")
+      if mqtt_publish_error():
+        print(f"最近错误: {mqtt_publish_error()}")
     sys.exit(0 if ok else 1)
   parser.print_help()
 
