@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.2}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.3}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -251,6 +251,24 @@ get_web_access_url() {
   fi
 }
 
+check_web_health() {
+  local port="${WEB_PORT:-8088}"
+  local attempt
+
+  for attempt in 1 2 3 4 5; do
+    if curl -fsS --connect-timeout 2 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+      green "Web 本机健康检查通过：http://127.0.0.1:${port}/health"
+      return 0
+    fi
+    sleep 1
+  done
+
+  yellow "Web 本机健康检查失败：http://127.0.0.1:${port}/health"
+  yellow "请在 VPS 上查看：systemctl status ${PANEL_NAME}-master.service"
+  yellow "请在 VPS 上查看：journalctl -u ${PANEL_NAME}-master.service -n 80 --no-pager"
+  return 0
+}
+
 get_registered_node_count() {
   if [ ! -f "${STATE_DIR}/master.db" ]; then
     printf "0\n"
@@ -429,6 +447,7 @@ setup_master() {
   systemctl enable --now mosquitto >/dev/null 2>&1 || true
   systemctl enable --now "${PANEL_NAME}-master.service" >/dev/null 2>&1 || true
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+  check_web_health
 
   green "MQTT 主控服务已安装。Web 首次访问 ${public_url} 后创建管理员，并绑定 Google Authenticator。"
 }

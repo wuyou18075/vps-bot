@@ -140,6 +140,13 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertEqual(1, publish.call_count)
     self.assertIn(f"vps-bot/commands/{first['node_id']}", publish.call_args.args[1])
 
+  def test_response_version_string_does_not_crash(self):
+    handler = object.__new__(mqtt_master.MasterRequestHandler)
+
+    version = handler.version_string()
+
+    self.assertIn("VpsMqttMaster", version)
+
 
 if __name__ == "__main__":
   unittest.main()

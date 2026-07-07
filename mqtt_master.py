@@ -713,9 +713,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   """Small secure web/API handler."""
 
   rate_limiter = LoginRateLimiter()
-
-  def server_version(self):
-    return "VpsMqttMaster/1.0"
+  server_version = "VpsMqttMaster/1.0"
 
   @property
   def db(self):

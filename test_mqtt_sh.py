@@ -127,6 +127,7 @@ class MqttShellTest(unittest.TestCase):
       MOSQUITTO_PASSWD=/tmp/vps-mqtt-passwd
       install_dependencies() { :; }
       systemctl() { :; }
+      check_web_health() { printf '%s\\n' health-ok; }
       mosquitto_passwd() { printf '%s %s %s\\n' "$@" >> /tmp/vps-mqtt-passwd-calls; }
       cp() { command cp "$@"; }
       setup_master <<'EOF'
@@ -150,6 +151,7 @@ EOF
     self.assertIn("ExecStart=/usr/bin/python3 /tmp/vps-mqtt-test-install/mqtt_master.py --config /tmp/vps-mqtt-test-config/config.env serve", output)
     self.assertIn("password_file /tmp/vps-mqtt-passwd", output)
     self.assertIn("acl_file /tmp/vps-mqtt-acl", output)
+    self.assertIn("health-ok", output)
 
   def test_setup_master_defaults_public_url_to_ip_port(self):
     script = textwrap.dedent("""
@@ -166,6 +168,7 @@ EOF
       get_primary_ip() { printf '%s\\n' '5.6.7.8'; }
       install_dependencies() { :; }
       systemctl() { :; }
+      check_web_health() { :; }
       mosquitto_passwd() { :; }
       cp() { command cp "$@"; }
       setup_master <<'EOF'
@@ -180,6 +183,20 @@ EOF
 
     self.assertIn('PUBLIC_URL="http://5.6.7.8:9090"', output)
     self.assertIn('WEB_HOST="0.0.0.0"', output)
+
+  def test_check_web_health_reports_failure(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      WEB_PORT=8088
+      curl() { return 7; }
+      sleep() { :; }
+      check_web_health
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("Web 本机健康检查失败", output)
+    self.assertIn("journalctl -u vps-mqtt-master.service", output)
 
   def test_register_agent_invokes_agent_and_service_setup(self):
     script = textwrap.dedent("""
