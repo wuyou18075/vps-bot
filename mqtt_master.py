@@ -2,6 +2,7 @@
 """Secure MQTT master service for VPS monitoring and Telegram control."""
 
 import argparse
+import asyncio
 import base64
 from contextlib import contextmanager
 import hashlib
@@ -140,6 +141,18 @@ def verify_password(password, encoded):
     return False
   expected = hash_password(password, salt=salt, iterations=iterations)
   return hmac.compare_digest(expected, encoded)
+
+
+def is_https_headers(headers):
+  """Return whether proxy headers indicate HTTPS."""
+  return (headers.get("X-Forwarded-Proto", "").lower() == "https"
+          or headers.get("X-Forwarded-Ssl", "").lower() == "on")
+
+
+def build_session_cookie_value(session, headers):
+  """Build a session cookie value for HTTP or HTTPS deployments."""
+  secure = "; Secure" if is_https_headers(headers) else ""
+  return f"session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400{secure}"
 
 
 class LoginRateLimiter:
@@ -1200,13 +1213,11 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
 
   def is_https_request(self):
     """Return whether the original request used HTTPS."""
-    return (self.headers.get("X-Forwarded-Proto", "").lower() == "https"
-            or self.headers.get("X-Forwarded-Ssl", "").lower() == "on")
+    return is_https_headers(self.headers)
 
   def build_session_cookie(self, session):
     """Build a session cookie suitable for HTTP or HTTPS deployments."""
-    secure = "; Secure" if self.is_https_request() else ""
-    return f"session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400{secure}"
+    return build_session_cookie_value(session, self.headers)
 
   def redirect(self, path):
     """Redirect to path."""
@@ -1646,6 +1657,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     state.textContent = data.monitor_state || "未运行";
     body.innerHTML = (data.nodes || []).map(row).join("");
   }};
+  let socket = null;
   let fallbackTimer = null;
   const poll = async () => {{
     const response = await fetch("/api/monitor", {{ cache: "no-store" }});
@@ -1656,10 +1668,26 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     poll();
     fallbackTimer = setInterval(poll, 5000);
   }};
-  if ("EventSource" in window) {{
-    const stream = new EventSource("/events/monitor");
-    stream.onmessage = (event) => render(JSON.parse(event.data));
-    stream.onerror = startFallback;
+  const sendAction = (payload) => {{
+    if (socket && socket.readyState === WebSocket.OPEN) {{
+      socket.send(JSON.stringify(payload));
+      return true;
+    }}
+    return false;
+  }};
+  document.querySelector('form[action="/snapshot"]').addEventListener("submit", (event) => {{
+    if (sendAction({{ action: "snapshot" }})) event.preventDefault();
+  }});
+  document.querySelector('form[action="/dynamic-monitor"]').addEventListener("submit", (event) => {{
+    const minutes = event.currentTarget.querySelector('input[name="minutes"]').value || "1";
+    if (sendAction({{ action: "start_monitor", minutes }})) event.preventDefault();
+  }});
+  if ("WebSocket" in window) {{
+    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+    socket = new WebSocket(`${{scheme}}://${{window.location.host}}/ws/monitor`);
+    socket.onmessage = (event) => render(JSON.parse(event.data));
+    socket.onclose = startFallback;
+    socket.onerror = startFallback;
   }} else {{
     startFallback();
   }}
@@ -1791,6 +1819,299 @@ class MasterHTTPServer(http.server.ThreadingHTTPServer):
     self.config = config
 
 
+class PanelRenderer:
+  """Reuse existing page renderers outside BaseHTTPRequestHandler."""
+
+  page = MasterRequestHandler.page
+  render_setup = MasterRequestHandler.render_setup
+  render_login = MasterRequestHandler.render_login
+  render_dashboard = MasterRequestHandler.render_dashboard
+  render_totp = MasterRequestHandler.render_totp
+  render_monitor = MasterRequestHandler.render_monitor
+
+  def __init__(self, db, config):
+    self.server = type("Server", (), {"db": db, "config": config})()
+
+  @property
+  def db(self):
+    return self.server.db
+
+  @property
+  def config(self):
+    return self.server.config
+
+
+def aiohttp_import():
+  """Import aiohttp lazily so tests can run without the optional package."""
+  from aiohttp import web
+  return web
+
+
+def aiohttp_html_response(web, body, status=200):
+  """Build an aiohttp HTML response with security headers."""
+  headers = {
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+  }
+  return web.Response(text=body, status=status, content_type="text/html", charset="utf-8", headers=headers)
+
+
+def aiohttp_redirect(web, path):
+  """Build an aiohttp redirect response."""
+  raise web.HTTPSeeOther(path)
+
+
+async def aiohttp_require_user(request):
+  """Return current session user or raise a login redirect."""
+  user = request.app["db"].session_user(request.cookies.get("session", ""))
+  if not user:
+    aiohttp_redirect(request.app["web"], "/login")
+  return user
+
+
+async def aiohttp_form(request):
+  """Read URL-encoded form data from aiohttp."""
+  data = await request.post()
+  return {key: str(value) for key, value in data.items()}
+
+
+def start_dynamic_monitor(db, config, minutes):
+  """Start dynamic monitor collection for a bounded number of minutes."""
+  try:
+    value = max(1, min(int(minutes or "1"), 120))
+  except ValueError:
+    value = 1
+  until = int(time.time()) + value * 60
+  db.set_setting("monitor_until", str(until))
+  threading.Thread(target=dynamic_monitor_loop, args=(db, config, until), daemon=True).start()
+  return value
+
+
+def build_aiohttp_app(db, config):
+  """Build the aiohttp web application."""
+  web = aiohttp_import()
+  app = web.Application()
+  app["db"] = db
+  app["config"] = config
+  app["web"] = web
+  app["renderer"] = PanelRenderer(db, config)
+  app["rate_limiter"] = LoginRateLimiter()
+
+  async def health(request):
+    return web.Response(text="ok")
+
+  async def login_page(request):
+    return aiohttp_html_response(web, app["renderer"].render_login())
+
+  async def setup_page(request):
+    if db.has_admin():
+      aiohttp_redirect(web, "/login")
+    return aiohttp_html_response(web, app["renderer"].render_setup())
+
+  async def setup_post(request):
+    if db.has_admin():
+      aiohttp_redirect(web, "/login")
+    form = await aiohttp_form(request)
+    password = form.get("password", "")
+    if len(password) < 2:
+      return aiohttp_html_response(web, app["renderer"].page("初始化失败", "<p>密码至少 2 位。</p>"), status=400)
+    username = form.get("username", "admin").strip() or "admin"
+    db.create_admin(username, password)
+    db.audit(username, "create_admin", "first setup")
+    aiohttp_redirect(web, "/login")
+
+  async def login_post(request):
+    form = await aiohttp_form(request)
+    username = form.get("username", "").strip()
+    password = form.get("password", "")
+    remote_ip = request.remote or ""
+    limiter = app["rate_limiter"]
+    if not limiter.allow(remote_ip, username):
+      return aiohttp_html_response(web, app["renderer"].render_login("登录失败，请稍后再试。"), status=429)
+    user = db.get_user(username)
+    valid = bool(user and verify_password(password, user["password_hash"]))
+    if valid and user["totp_enabled"]:
+      valid = verify_totp(user["totp_secret"], form.get("totp", ""))
+    if not valid:
+      limiter.record_failure(remote_ip, username)
+      return aiohttp_html_response(web, app["renderer"].render_login("登录失败。"), status=401)
+    limiter.record_success(remote_ip, username)
+    session = db.create_session(username)
+    response = web.HTTPSeeOther("/")
+    response.headers["Set-Cookie"] = build_session_cookie_value(session, request.headers)
+    raise response
+
+  async def dashboard(request):
+    user = await aiohttp_require_user(request)
+    return aiohttp_html_response(web, app["renderer"].render_dashboard(user))
+
+  async def totp_page(request):
+    user = await aiohttp_require_user(request)
+    return aiohttp_html_response(web, app["renderer"].render_totp(user))
+
+  async def totp_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    secret = form.get("secret", "")
+    if not verify_totp(secret, form.get("code", "")):
+      return aiohttp_html_response(web, app["renderer"].page("绑定失败", "<p>验证码错误。</p>"), status=400)
+    db.enable_totp(user, secret)
+    db.audit(user, "enable_totp", "enabled")
+    aiohttp_redirect(web, "/")
+
+  async def monitor_page(request):
+    user = await aiohttp_require_user(request)
+    return aiohttp_html_response(web, app["renderer"].render_monitor(user))
+
+  async def monitor_api(request):
+    await aiohttp_require_user(request)
+    return web.json_response(monitor_payload(db))
+
+  async def monitor_ws(request):
+    await aiohttp_require_user(request)
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+    while not ws.closed:
+      await ws.send_json(monitor_payload(db))
+      try:
+        message = await asyncio.wait_for(ws.receive(), timeout=3)
+      except asyncio.TimeoutError:
+        continue
+      if message.type == web.WSMsgType.TEXT:
+        try:
+          payload = json.loads(message.data)
+        except json.JSONDecodeError:
+          continue
+        action = payload.get("action")
+        if action == "snapshot":
+          request_snapshot(db, config, online_only=False)
+        elif action == "start_monitor":
+          minutes = start_dynamic_monitor(db, config, payload.get("minutes", "1"))
+          db.audit("websocket", "dynamic_monitor", f"{minutes} minutes")
+        elif action == "stop_monitor":
+          db.set_setting("monitor_until", "0")
+        await ws.send_json(monitor_payload(db))
+      elif message.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSED, web.WSMsgType.ERROR):
+        break
+    return ws
+
+  async def telegram_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    ok, message = save_telegram_settings(db, user, form)
+    if not ok:
+      return aiohttp_html_response(web, app["renderer"].page("Telegram 绑定失败", f"<p>{html.escape(message)}</p>"), status=400)
+    return aiohttp_html_response(web, app["renderer"].page("Telegram 绑定成功", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"))
+
+  async def telegram_delete_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    ok, message = delete_telegram_settings(db, user, form.get("current_password", ""))
+    if not ok:
+      return aiohttp_html_response(web, app["renderer"].page("Telegram 删除失败", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"), status=400)
+    return aiohttp_html_response(web, app["renderer"].page("Telegram 已删除", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"))
+
+  async def theme_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    if not save_theme(db, form.get("theme", "light")):
+      return aiohttp_html_response(web, app["renderer"].page("主题切换失败", "<p>不支持的主题。</p>"), status=400)
+    db.audit(user, "save_theme", form.get("theme", ""))
+    aiohttp_redirect(web, "/")
+
+  async def command_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    try:
+      dispatch_command(db, config, form.get("node_id", ""), form.get("command", ""))
+    except ValueError as error:
+      return aiohttp_html_response(web, app["renderer"].page("命令失败", f"<p>{html.escape(str(error))}</p>"), status=400)
+    db.audit(user, "web_command", form.get("command", ""))
+    aiohttp_redirect(web, "/")
+
+  async def registration_command_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    command = create_registration_command_for_web(db, config, form.get("name", ""))
+    db.audit(user, "create_registration_command", form.get("name", ""))
+    return aiohttp_html_response(web, app["renderer"].page("绑定 VPS", f"""
+<h1>绑定 VPS</h1>
+<p>在要绑定的 VPS 上执行：</p>
+<textarea style="width:100%; min-height:120px">{html.escape(command)}</textarea>
+<p><a href="/">返回面板</a></p>"""))
+
+  async def node_action_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    message = handle_node_action(db, config, form.get("node_id", ""), form.get("action", ""))
+    db.audit(user, "node_action", message)
+    return aiohttp_html_response(web, app["renderer"].page("VPS 操作", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"))
+
+  async def node_profile_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    ok, message = update_node_profile(db, form.get("node_id", ""), form)
+    if not ok:
+      return aiohttp_html_response(web, app["renderer"].page("节点保存失败", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"), status=400)
+    db.audit(user, "node_profile", message)
+    aiohttp_redirect(web, "/")
+
+  async def snapshot_post(request):
+    user = await aiohttp_require_user(request)
+    try:
+      message = request_snapshot(db, config, online_only=False)
+    except ValueError as error:
+      message = str(error)
+    db.audit(user, "request_snapshot", message)
+    return aiohttp_html_response(web, app["renderer"].page("获取快照", f"<p>{html.escape(message)}</p><p><a href='/monitor'>查看展示页面</a></p>"))
+
+  async def dynamic_monitor_post(request):
+    user = await aiohttp_require_user(request)
+    form = await aiohttp_form(request)
+    minutes = start_dynamic_monitor(db, config, form.get("minutes", "1"))
+    db.audit(user, "dynamic_monitor", f"{minutes} minutes")
+    aiohttp_redirect(web, "/monitor")
+
+  async def register_api(request):
+    form = await aiohttp_form(request)
+    if not db.consume_registration_token(form.get("token", "")):
+      return web.Response(status=403)
+    node = register_node_from_agent(db, config, form)
+    return web.json_response({
+      **node,
+      "mqtt_host": config.get("MQTT_HOST", "127.0.0.1"),
+      "mqtt_port": config.get("MQTT_PORT", "1883"),
+      "topic_prefix": config.get("MQTT_TOPIC_PREFIX", DEFAULT_TOPIC_PREFIX),
+    })
+
+  app.add_routes([
+    web.get("/health", health),
+    web.get("/login", login_page),
+    web.post("/login", login_post),
+    web.get("/setup", setup_page),
+    web.post("/setup", setup_post),
+    web.get("/", dashboard),
+    web.get("/totp", totp_page),
+    web.post("/totp", totp_post),
+    web.get("/monitor", monitor_page),
+    web.get("/api/monitor", monitor_api),
+    web.get("/ws/monitor", monitor_ws),
+    web.post("/telegram", telegram_post),
+    web.post("/telegram-delete", telegram_delete_post),
+    web.post("/theme", theme_post),
+    web.post("/command", command_post),
+    web.post("/registration-command", registration_command_post),
+    web.post("/node-action", node_action_post),
+    web.post("/node-profile", node_profile_post),
+    web.post("/snapshot", snapshot_post),
+    web.post("/dynamic-monitor", dynamic_monitor_post),
+    web.post("/api/register", register_api),
+  ])
+  return app
+
+
 def serve(config_path=DEFAULT_CONFIG, db_path=DEFAULT_DB):
   """Run the master web server."""
   config = load_env(config_path)
@@ -1798,10 +2119,10 @@ def serve(config_path=DEFAULT_CONFIG, db_path=DEFAULT_DB):
   config = runtime_config(db, config)
   host = config.get("WEB_HOST", "127.0.0.1")
   port = int(config.get("WEB_PORT", "8088"))
-  server = MasterHTTPServer((host, port), MasterRequestHandler, db, config)
   threading.Thread(target=mqtt_event_loop, args=(db, config), daemon=True).start()
   threading.Thread(target=telegram_poll_loop, args=(db, config), daemon=True).start()
-  server.serve_forever()
+  web = aiohttp_import()
+  web.run_app(build_aiohttp_app(db, config), host=host, port=port)
 
 
 def create_registration_command(config_path=DEFAULT_CONFIG, db_path=DEFAULT_DB, name=""):

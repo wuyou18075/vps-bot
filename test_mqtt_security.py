@@ -446,7 +446,7 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertIn("offline", html)
     self.assertIn("暂无", html)
 
-  def test_monitor_page_uses_live_event_stream(self):
+  def test_monitor_page_uses_websocket_stream(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
       handler = object.__new__(mqtt_master.MasterRequestHandler)
@@ -454,8 +454,8 @@ class MqttSecurityTest(unittest.TestCase):
 
       html = handler.render_monitor("admin")
 
-    self.assertIn("EventSource", html)
-    self.assertIn("/events/monitor", html)
+    self.assertIn("WebSocket", html)
+    self.assertIn("/ws/monitor", html)
     self.assertIn("/api/monitor", html)
 
   def test_monitor_payload_contains_nodes_and_state(self):

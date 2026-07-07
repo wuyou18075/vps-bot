@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.16}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.17}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -166,6 +166,10 @@ has_dependency_command() {
     systemctl list-unit-files mosquitto.service >/dev/null 2>&1 || command -v mosquitto >/dev/null 2>&1
     return
   fi
+  if [ "${package}" = "python3-aiohttp" ]; then
+    python3 -c "import aiohttp" >/dev/null 2>&1
+    return
+  fi
   command -v "${command_name}" >/dev/null 2>&1
 }
 
@@ -173,6 +177,7 @@ get_missing_dependencies() {
   local specs=(
     "curl:curl"
     "python3:python3"
+    "python3-aiohttp:aiohttp"
     "openssl:openssl"
     "qrencode:qrencode"
     "mosquitto:mosquitto"
@@ -428,6 +433,9 @@ server {
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
   }
 }
 EOF
@@ -503,6 +511,7 @@ setup_master() {
 
 deploy_web() {
   require_root
+  install_dependencies
   install_project_files
   load_config
   write_nginx_config

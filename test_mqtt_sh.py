@@ -32,6 +32,7 @@ class MqttShellTest(unittest.TestCase):
     self.assertIn("mosquitto", output)
     self.assertIn("mosquitto-clients", output)
     self.assertIn("python3", output)
+    self.assertIn("python3-aiohttp", output)
     self.assertIn("nginx", output)
     self.assertIn("qrencode", output)
 
@@ -213,6 +214,7 @@ EOF
       SYSTEMCTL_LOG=/tmp/vps-mqtt-deploy-systemctl.log
       rm -f "${SYSTEMCTL_LOG}"
       pause() { :; }
+      install_dependencies() { :; }
       systemctl() { printf '%s\\n' "$*" >> "${SYSTEMCTL_LOG}"; }
       deploy_web
       cat "${SYSTEMCTL_LOG}"
@@ -221,6 +223,23 @@ EOF
     output = self.run_bash(script)
 
     self.assertIn("restart vps-mqtt-master.service", output)
+
+  def test_nginx_config_supports_websocket_upgrade(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      CONFIG_DIR=/tmp/vps-mqtt-websocket-config
+      NGINX_FILE=/tmp/vps-mqtt-websocket-nginx.conf
+      NGINX_LINK=/tmp/vps-mqtt-websocket-nginx.link
+      WEB_PORT=8088
+      write_nginx_config
+      cat "${NGINX_FILE}"
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("proxy_set_header Upgrade $http_upgrade;", output)
+    self.assertIn('proxy_set_header Connection "upgrade";', output)
+    self.assertIn("proxy_read_timeout 3600s;", output)
 
   def test_setup_master_rejects_mismatched_admin_passwords(self):
     script = textwrap.dedent("""
