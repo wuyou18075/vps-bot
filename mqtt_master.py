@@ -588,6 +588,21 @@ class MasterDatabase:
       db.commit()
     return True
 
+  def release_registration_token(self, token):
+    """Release a consumed registration token after a backend failure."""
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = int(time.time())
+    with self.connect() as db:
+      db.execute(
+        """
+        UPDATE registration_tokens
+        SET used_at=NULL
+        WHERE token_hash=? AND expires_at>=?
+        """,
+        (token_hash, now),
+      )
+      db.commit()
+
   def register_node(self, name):
     """Register a node and return its credentials."""
     safe_name = (name or socket.gethostname()).strip()[:80]
@@ -1915,12 +1930,17 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     form = self.read_form()
     token = form.get("token", "")
     if not self.db.consume_registration_token(token):
+      payload = json.dumps({"error": "注册码无效、已过期或已使用"}, ensure_ascii=False).encode("utf-8")
       self.send_response(403)
+      self.send_header("Content-Type", "application/json; charset=utf-8")
+      self.send_header("Content-Length", str(len(payload)))
       self.end_headers()
+      self.wfile.write(payload)
       return
     try:
       node = register_node_from_agent(self.db, self.config, form)
     except RuntimeError as error:
+      self.db.release_registration_token(token)
       payload = json.dumps({"error": str(error)}, ensure_ascii=False).encode("utf-8")
       self.send_response(503)
       self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2213,11 +2233,13 @@ def build_aiohttp_app(db, config):
 
   async def register_api(request):
     form = await aiohttp_form(request)
-    if not db.consume_registration_token(form.get("token", "")):
-      return web.Response(status=403)
+    token = form.get("token", "")
+    if not db.consume_registration_token(token):
+      return web.json_response({"error": "注册码无效、已过期或已使用"}, status=403)
     try:
       node = register_node_from_agent(db, config, form)
     except RuntimeError as error:
+      db.release_registration_token(token)
       return web.json_response({"error": str(error)}, status=503)
     return web.json_response({
       **node,

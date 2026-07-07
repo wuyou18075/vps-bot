@@ -49,6 +49,25 @@ class MqttSecurityTest(unittest.TestCase):
     expired = store.create_token(ttl_seconds=10, now=1000)
     self.assertFalse(store.consume_token(expired, now=1011))
 
+  def test_registration_token_can_be_retried_after_backend_failure(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      token = db.create_registration_token()
+
+      self.assertTrue(db.consume_registration_token(token))
+      db.release_registration_token(token)
+
+      self.assertTrue(db.consume_registration_token(token))
+
+  def test_registration_token_stays_used_after_success(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      token = db.create_registration_token()
+
+      self.assertTrue(db.consume_registration_token(token))
+
+      self.assertFalse(db.consume_registration_token(token))
+
   def test_acl_limits_agent_to_own_topics(self):
     acl = mqtt_master.render_mosquitto_acl("vps-bot", [
       {"node_id": "node-a", "mqtt_username": "vps_node_a"},
@@ -860,6 +879,23 @@ class MqttSecurityTest(unittest.TestCase):
     with mock.patch("mqtt_agent.urllib.request.urlopen", side_effect=error):
       try:
         with self.assertRaisesRegex(RuntimeError, "MQTT 节点账号验证失败"):
+          mqtt_agent.register_agent("http://master", "token", "new", "/tmp/agent.env")
+      finally:
+        error.close()
+
+  def test_agent_registration_surfaces_invalid_token_message(self):
+    body = io.BytesIO(json.dumps({"error": "注册码无效、已过期或已使用"}).encode("utf-8"))
+    error = mqtt_agent.urllib.error.HTTPError(
+      "http://master/api/register",
+      403,
+      "Forbidden",
+      {},
+      body,
+    )
+
+    with mock.patch("mqtt_agent.urllib.request.urlopen", side_effect=error):
+      try:
+        with self.assertRaisesRegex(RuntimeError, "注册码无效、已过期或已使用"):
           mqtt_agent.register_agent("http://master", "token", "new", "/tmp/agent.env")
       finally:
         error.close()
