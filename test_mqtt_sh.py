@@ -245,6 +245,14 @@ EOF
 
     self.assertIn("Web 管理员密码至少 2 位", output)
 
+  def test_installer_password_input_is_visible(self):
+    with open("mqtt.sh", "r", encoding="utf-8") as file:
+      script = file.read()
+
+    self.assertNotIn("stty -echo", script)
+    self.assertNotIn("read -r -s", script)
+    self.assertIn("请输入 Web 管理员密码（至少 2 位）", script)
+
   def test_setup_master_persists_runtime_settings_to_sqlite(self):
     script = textwrap.dedent("""
       VPS_MQTT_TESTING=1 source ./mqtt.sh

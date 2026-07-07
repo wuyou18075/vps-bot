@@ -894,7 +894,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   def handle_login(self):
     """Authenticate user with optional TOTP."""
     form = self.read_form()
-    username = form.get("username", "")
+    username = form.get("username", "").strip()
     password = form.get("password", "")
     remote_ip = self.client_address[0]
     if not self.rate_limiter.allow(remote_ip, username):

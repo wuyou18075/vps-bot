@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.7}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.8}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -100,23 +100,6 @@ write_config_value() {
   else
     printf "%s=\"%s\"\n" "${key}" "${value}" >> "${CONFIG_FILE}"
   fi
-}
-
-read_secret() {
-  local prompt="$1"
-  local variable="$2"
-  local value=""
-
-  if [ -t 0 ]; then
-    printf "%s" "${prompt}" >&2
-    stty -echo 2>/dev/null || true
-    IFS= read -r value
-    stty echo 2>/dev/null || true
-    printf "\n" >&2
-  else
-    IFS= read -r value
-  fi
-  printf -v "${variable}" "%s" "${value}"
 }
 
 random_secret() {
@@ -469,8 +452,8 @@ setup_master() {
   web_port="${web_port:-${WEB_PORT:-8088}}"
   read -r -p "请输入 Web 管理员用户名 [admin]: " admin_username
   admin_username="${admin_username:-admin}"
-  read_secret "请输入 Web 管理员密码（至少 2 位）: " admin_password
-  read_secret "请再次输入 Web 管理员密码: " admin_password_confirm
+  read -r -p "请输入 Web 管理员密码（至少 2 位）: " admin_password
+  read -r -p "请再次输入 Web 管理员密码: " admin_password_confirm
   if [ "${admin_password}" != "${admin_password_confirm}" ]; then
     red "两次输入的密码不一致。"
     return

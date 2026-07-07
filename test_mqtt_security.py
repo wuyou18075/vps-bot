@@ -194,6 +194,32 @@ class MqttSecurityTest(unittest.TestCase):
 
     self.assertIn("; Secure", cookie)
 
+  def test_login_trims_username_and_sets_session_cookie(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.create_admin("dajiab", "pw")
+      handler = object.__new__(mqtt_master.MasterRequestHandler)
+      handler.headers = {"X-Forwarded-Proto": "http"}
+      handler.client_address = ("127.0.0.1", 12345)
+      handler.rate_limiter = mqtt_master.LoginRateLimiter()
+      handler.read_form = lambda: {
+        "username": " dajiab ",
+        "password": "pw",
+        "totp": "",
+      }
+      handler.server = type("Server", (), {"db": db})()
+      sent = []
+      handler.send_response = lambda status: sent.append(("status", status))
+      handler.send_header = lambda key, value: sent.append((key, value))
+      handler.end_headers = lambda: sent.append(("end", ""))
+
+      handler.handle_login()
+
+    self.assertIn(("status", 303), sent)
+    cookie = next(value for key, value in sent if key == "Set-Cookie")
+    self.assertIn("session=", cookie)
+    self.assertNotIn("; Secure", cookie)
+
 
 if __name__ == "__main__":
   unittest.main()
