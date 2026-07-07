@@ -29,6 +29,9 @@ DEFAULT_DB = "/var/lib/vps-mqtt/master.db"
 DEFAULT_TOPIC_PREFIX = "vps-bot"
 DEFAULT_MOSQUITTO_ACL = "/etc/mosquitto/vps-mqtt.acl"
 DEFAULT_MOSQUITTO_PASSWD = "/etc/mosquitto/vps-mqtt.passwd"
+DEFAULT_MONITOR_MINUTES = 3
+REALTIME_MONITOR_INTERVAL_SECONDS = 5
+REALTIME_WS_PUSH_SECONDS = 2
 RUNTIME_SETTING_KEYS = [
   "PUBLIC_URL",
   "RAW_BASE_URL",
@@ -978,15 +981,20 @@ def handle_node_action(db, config, node_id, action):
   return "不支持的操作。"
 
 
-def request_snapshot(db, config, online_only=True):
-  """Dispatch a snapshot command to registered nodes."""
+def request_realtime_metrics(db, config, online_only=False):
+  """Dispatch a realtime metrics command to registered nodes."""
   nodes = db.list_nodes()
   if online_only:
     nodes = [node for node in nodes if node["status"] == "online"]
   for node in nodes:
     dispatch_command(db, config, node["node_id"], "/snapshot")
   scope = "在线 VPS" if online_only else "VPS"
-  return f"已向 {len(nodes)} 台{scope}请求快照。"
+  return f"已向 {len(nodes)} 台{scope}请求实时指标。"
+
+
+def request_snapshot(db, config, online_only=True):
+  """Compatibility wrapper for older callers."""
+  return request_realtime_metrics(db, config, online_only=online_only)
 
 
 def monitor_payload(db):
@@ -1018,11 +1026,11 @@ def monitor_payload(db):
   }
 
 
-def dynamic_monitor_loop(db, config, until_ts, interval_seconds=60):
-  """Request snapshots periodically until the configured deadline."""
+def dynamic_monitor_loop(db, config, until_ts, interval_seconds=REALTIME_MONITOR_INTERVAL_SECONDS):
+  """Request realtime metrics periodically until the configured deadline."""
   while int(time.time()) < until_ts:
     try:
-      request_snapshot(db, config, online_only=False)
+      request_realtime_metrics(db, config, online_only=False)
     except Exception:
       pass
     time.sleep(interval_seconds)
@@ -1035,7 +1043,6 @@ def telegram_help_text(db):
     "支持命令:",
     "/select 选择 VPS 范围",
     "/nodes 查看已注册 VPS",
-    "/snapshot 获取监控快照",
     "/ping [目标]",
     "/use",
     "/speed",
@@ -1394,9 +1401,6 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     if self.path == "/node-profile":
       self.handle_node_profile(user)
       return
-    if self.path == "/snapshot":
-      self.handle_snapshot(user)
-      return
     if self.path == "/dynamic-monitor":
       self.handle_dynamic_monitor(user)
       return
@@ -1515,7 +1519,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       f"<td><form method='post' action='/command'>"
       f"<input type='hidden' name='node_id' value='{html.escape(item['node_id'])}'>"
       "<select name='command'>"
-      "<option>/snapshot</option><option>/status</option><option>/use</option><option>/speed</option>"
+      "<option>/status</option><option>/use</option><option>/speed</option>"
       "<option>/disk</option><option>/top</option><option>/uptime</option>"
       "<option>/services</option>"
       "</select> <button>执行</button></form>"
@@ -1603,7 +1607,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     self.redirect("/")
 
   def render_monitor(self, user):
-    """Render the monitoring snapshot page."""
+    """Render the realtime monitoring page."""
     def ts_text(value):
       timestamp = int(value or 0)
       if not timestamp:
@@ -1621,24 +1625,24 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       f"<td>{float(item.get('cpu_percent') or 0):.1f}%</td>"
       f"<td>{float(item.get('memory_percent') or 0):.1f}%</td>"
       f"<td>{float(item.get('latency_ms') or 0):.1f} ms</td>"
-      f"<td>快照 {ts_text(item.get('snapshot_ts'))}<br><span class='muted'>心跳 {ts_text(item.get('last_seen'))}</span></td>"
+      f"<td>数据 {ts_text(item.get('snapshot_ts'))}<br><span class='muted'>心跳 {ts_text(item.get('last_seen'))}</span></td>"
       "</tr>"
       for item in self.db.latest_node_snapshots()
     ])
     monitor_until = int(self.db.get_setting("monitor_until", "0") or "0")
     state = "运行中" if monitor_until > int(time.time()) else "未运行"
+    monitor_minutes = html.escape(self.db.get_setting("monitor_minutes", str(DEFAULT_MONITOR_MINUTES)) or str(DEFAULT_MONITOR_MINUTES))
     return self.page("VPS 监控展示", f"""
 <div class="topbar">
   <div>
     <h1>VPS 监控展示</h1>
-    <p class="muted">动态监控: <span id="monitor-state">{state}</span> · 连接: <span id="ws-state">连接中</span> · 最后刷新: <span id="last-refresh">暂无</span></p>
+    <p class="muted">实时监控: <span id="monitor-state">{state}</span> · 连接: <span id="ws-state">未连接</span> · 最后刷新: <span id="last-refresh">暂无</span></p>
   </div>
   <div class="toolbar">
     <a href="/">返回面板</a>
-    <form class="inline" method="post" action="/snapshot"><button>获取快照</button></form>
-    <form class="inline" method="post" action="/dynamic-monitor">
-      <input name="minutes" inputmode="numeric" placeholder="分钟数" style="width: 100px">
-      <button>动态监控</button>
+    <form class="inline" id="realtime-form" method="post" action="/dynamic-monitor">
+      <input name="minutes" inputmode="numeric" value="{monitor_minutes}" placeholder="分钟数" style="width: 100px">
+      <button>实时监控</button>
     </form>
   </div>
 </div>
@@ -1672,7 +1676,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       <td>${{fixed(item.cpu_percent, 1)}}%</td>
       <td>${{fixed(item.memory_percent, 1)}}%</td>
       <td>${{fixed(item.latency_ms, 1)}} ms</td>
-      <td>快照 ${{timeText(item.snapshot_ts)}}<br><span class="muted">心跳 ${{timeText(item.last_seen)}}</span></td>
+      <td>数据 ${{timeText(item.snapshot_ts)}}<br><span class="muted">心跳 ${{timeText(item.last_seen)}}</span></td>
     </tr>`;
   const render = (data) => {{
     state.textContent = data.monitor_state || "未运行";
@@ -1680,48 +1684,33 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     body.innerHTML = (data.nodes || []).map(row).join("");
   }};
   let socket = null;
-  let fallbackTimer = null;
   const setWsState = (value) => {{
     wsState.textContent = value;
   }};
-  const poll = async () => {{
-    try {{
-      const response = await fetch("/api/monitor", {{ cache: "no-store" }});
-      if (response.ok) render(await response.json());
-    }} catch (error) {{
-      setWsState("HTTP 兜底失败");
+  const startRealtime = (minutes) => {{
+    if (!("WebSocket" in window)) {{
+      setWsState("浏览器不支持 WebSocket");
+      return;
     }}
-  }};
-  const startFallback = (label = "HTTP 兜底") => {{
-    setWsState(label);
-    if (fallbackTimer) return;
-    poll();
-    fallbackTimer = setInterval(poll, 5000);
-  }};
-  const sendAction = (payload) => {{
-    if (socket && socket.readyState === WebSocket.OPEN) {{
-      socket.send(JSON.stringify(payload));
-      return true;
+    if (socket && socket.readyState !== WebSocket.CLOSED) {{
+      socket.close();
     }}
-    return false;
-  }};
-  document.querySelector('form[action="/snapshot"]').addEventListener("submit", (event) => {{
-    if (sendAction({{ action: "snapshot" }})) event.preventDefault();
-  }});
-  document.querySelector('form[action="/dynamic-monitor"]').addEventListener("submit", (event) => {{
-    const minutes = event.currentTarget.querySelector('input[name="minutes"]').value || "1";
-    if (sendAction({{ action: "start_monitor", minutes }})) event.preventDefault();
-  }});
-  if ("WebSocket" in window) {{
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${{scheme}}://${{window.location.host}}/ws/monitor`);
-    socket.onopen = () => setWsState("WebSocket 已连接");
+    setWsState("连接中");
+    socket.onopen = () => {{
+      setWsState("WebSocket 已连接");
+      socket.send(JSON.stringify({{ action: "start_monitor", minutes }}));
+    }};
     socket.onmessage = (event) => render(JSON.parse(event.data));
-    socket.onclose = () => startFallback("WebSocket 断开，HTTP 兜底");
-    socket.onerror = () => startFallback("WebSocket 错误，HTTP 兜底");
-  }} else {{
-    startFallback("浏览器不支持 WebSocket，HTTP 兜底");
-  }}
+    socket.onclose = () => setWsState("实时监控已结束");
+    socket.onerror = () => setWsState("WebSocket 错误");
+  }};
+  document.getElementById("realtime-form").addEventListener("submit", (event) => {{
+    event.preventDefault();
+    const minutes = event.currentTarget.querySelector('input[name="minutes"]').value;
+    startRealtime(minutes);
+  }});
 }})();
 </script>""")
 
@@ -1792,13 +1781,13 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     self.redirect("/")
 
   def handle_snapshot(self, user):
-    """Request a one-time monitoring snapshot."""
+    """Compatibility handler for older one-time metrics requests."""
     try:
       message = request_snapshot(self.db, self.config, online_only=False)
     except ValueError as error:
       message = str(error)
-    self.db.audit(user, "request_snapshot", message)
-    self.send_html(self.page("获取快照", f"<p>{html.escape(message)}</p><p><a href='/monitor'>查看展示页面</a></p>"))
+    self.db.audit(user, "request_metrics", message)
+    self.send_html(self.page("实时指标", f"<p>{html.escape(message)}</p><p><a href='/monitor'>查看展示页面</a></p>"))
 
   def handle_dynamic_monitor(self, user):
     """Start a short-lived dynamic monitor loop."""
@@ -1910,13 +1899,21 @@ async def aiohttp_form(request):
 
 def start_dynamic_monitor(db, config, minutes):
   """Start dynamic monitor collection for a bounded number of minutes."""
+  raw_value = str(minutes or "").strip()
+  if not raw_value:
+    raw_value = db.get_setting("monitor_minutes", str(DEFAULT_MONITOR_MINUTES))
   try:
-    value = max(1, min(int(minutes or "1"), 120))
+    value = max(1, min(int(raw_value or str(DEFAULT_MONITOR_MINUTES)), 120))
   except ValueError:
-    value = 1
+    value = DEFAULT_MONITOR_MINUTES
   until = int(time.time()) + value * 60
+  db.set_setting("monitor_minutes", str(value))
   db.set_setting("monitor_until", str(until))
-  threading.Thread(target=dynamic_monitor_loop, args=(db, config, until), daemon=True).start()
+  threading.Thread(
+    target=dynamic_monitor_loop,
+    args=(db, config, until, REALTIME_MONITOR_INTERVAL_SECONDS),
+    daemon=True,
+  ).start()
   return value
 
 
@@ -2004,10 +2001,16 @@ def build_aiohttp_app(db, config):
     await aiohttp_require_user(request)
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
+    client_until = 0
     while not ws.closed:
+      now = int(time.time())
+      if client_until and now >= client_until:
+        await ws.send_json(monitor_payload(db))
+        await ws.close()
+        break
       await ws.send_json(monitor_payload(db))
       try:
-        message = await asyncio.wait_for(ws.receive(), timeout=3)
+        message = await asyncio.wait_for(ws.receive(), timeout=REALTIME_WS_PUSH_SECONDS)
       except asyncio.TimeoutError:
         continue
       if message.type == web.WSMsgType.TEXT:
@@ -2016,13 +2019,13 @@ def build_aiohttp_app(db, config):
         except json.JSONDecodeError:
           continue
         action = payload.get("action")
-        if action == "snapshot":
-          request_snapshot(db, config, online_only=False)
-        elif action == "start_monitor":
+        if action == "start_monitor":
           minutes = start_dynamic_monitor(db, config, payload.get("minutes", "1"))
+          client_until = int(db.get_setting("monitor_until", "0") or "0")
           db.audit("websocket", "dynamic_monitor", f"{minutes} minutes")
         elif action == "stop_monitor":
           db.set_setting("monitor_until", "0")
+          client_until = 0
         await ws.send_json(monitor_payload(db))
       elif message.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSED, web.WSMsgType.ERROR):
         break
@@ -2089,15 +2092,6 @@ def build_aiohttp_app(db, config):
     db.audit(user, "node_profile", message)
     aiohttp_redirect(web, "/")
 
-  async def snapshot_post(request):
-    user = await aiohttp_require_user(request)
-    try:
-      message = request_snapshot(db, config, online_only=False)
-    except ValueError as error:
-      message = str(error)
-    db.audit(user, "request_snapshot", message)
-    return aiohttp_html_response(web, app["renderer"].page("获取快照", f"<p>{html.escape(message)}</p><p><a href='/monitor'>查看展示页面</a></p>"))
-
   async def dynamic_monitor_post(request):
     user = await aiohttp_require_user(request)
     form = await aiohttp_form(request)
@@ -2136,7 +2130,6 @@ def build_aiohttp_app(db, config):
     web.post("/registration-command", registration_command_post),
     web.post("/node-action", node_action_post),
     web.post("/node-profile", node_profile_post),
-    web.post("/snapshot", snapshot_post),
     web.post("/dynamic-monitor", dynamic_monitor_post),
     web.post("/api/register", register_api),
   ])

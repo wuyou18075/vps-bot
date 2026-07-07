@@ -464,7 +464,7 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertIn("offline", html)
     self.assertIn("暂无", html)
 
-  def test_monitor_page_uses_websocket_stream(self):
+  def test_monitor_page_uses_websocket_realtime_only(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
       handler = object.__new__(mqtt_master.MasterRequestHandler)
@@ -474,11 +474,14 @@ class MqttSecurityTest(unittest.TestCase):
 
     self.assertIn("WebSocket", html)
     self.assertIn("/ws/monitor", html)
-    self.assertIn("/api/monitor", html)
     self.assertIn("ws-state", html)
     self.assertIn("last-refresh", html)
+    self.assertIn('value="3"', html)
+    self.assertIn("实时监控", html)
+    self.assertNotIn("获取快照", html)
+    self.assertNotIn('action="/snapshot"', html)
 
-  def test_monitor_page_shows_snapshot_and_heartbeat_times(self):
+  def test_monitor_page_shows_data_and_heartbeat_times(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
       node = db.register_node("test7")
@@ -488,8 +491,19 @@ class MqttSecurityTest(unittest.TestCase):
 
       html = handler.render_monitor("admin")
 
-    self.assertIn("快照", html)
+    self.assertIn("数据", html)
     self.assertIn("心跳", html)
+
+  def test_monitor_page_uses_remembered_minutes(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.set_setting("monitor_minutes", "7")
+      handler = object.__new__(mqtt_master.MasterRequestHandler)
+      handler.server = type("Server", (), {"db": db, "config": {}})()
+
+      html = handler.render_monitor("admin")
+
+    self.assertIn('value="7"', html)
 
   def test_monitor_payload_contains_nodes_and_state(self):
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -624,6 +638,33 @@ class MqttSecurityTest(unittest.TestCase):
     })
 
     self.assertIn("10.0.0.10", args)
+
+  def test_start_dynamic_monitor_defaults_to_three_minutes_and_remembers_value(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+
+      with mock.patch("mqtt_master.time.time", return_value=1800000000):
+        with mock.patch("mqtt_master.threading.Thread") as thread:
+          minutes = mqtt_master.start_dynamic_monitor(db, {}, "")
+
+      args = thread.call_args.kwargs["args"]
+      remembered = db.get_setting("monitor_minutes")
+      monitor_until = db.get_setting("monitor_until")
+
+    self.assertEqual(3, minutes)
+    self.assertEqual("3", remembered)
+    self.assertEqual(1800000180, int(monitor_until))
+    self.assertEqual(mqtt_master.REALTIME_MONITOR_INTERVAL_SECONDS, args[3])
+
+  def test_start_dynamic_monitor_uses_remembered_minutes_when_empty(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.set_setting("monitor_minutes", "9")
+
+      with mock.patch("mqtt_master.threading.Thread"):
+        minutes = mqtt_master.start_dynamic_monitor(db, {}, "")
+
+    self.assertEqual(9, minutes)
 
   def test_delete_node_dispatches_uninstall_before_removing_record(self):
     with tempfile.TemporaryDirectory() as temp_dir:

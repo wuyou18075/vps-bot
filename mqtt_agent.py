@@ -256,7 +256,7 @@ def execute_allowed_command(config, text):
     return {
       "command": "snapshot",
       "text": (
-        f"[{node_name}] 快照\n"
+        f"[{node_name}] 实时指标\n"
         f"月流量 {metrics['monthly_used_gb']:.2f} GB，今日 {metrics['daily_used_gb']:.2f} GB\n"
         f"CPU {metrics['cpu_percent']:.1f}%，内存 {metrics['memory_percent']:.1f}%，延迟 {metrics['latency_ms']:.1f} ms"
       ),
@@ -399,7 +399,7 @@ def command_result_payload(config, result, fallback_command):
 
 
 def publish_startup_snapshot(config):
-  """Publish an immediate heartbeat and snapshot after registration/startup."""
+  """Publish an immediate heartbeat and metrics sample after registration/startup."""
   node_id = config["NODE_ID"]
   status_ok = publish_status(config)
   result = execute_allowed_command(config, "/snapshot")
@@ -518,7 +518,7 @@ def main():
   if args.command == "startup-check":
     config = load_env(args.config)
     ok = publish_startup_snapshot(config)
-    print("MQTT 自检通过，已发送心跳和快照。" if ok else "MQTT 自检失败，未能发送心跳或快照。")
+    print("MQTT 自检通过，已发送心跳和实时指标。" if ok else "MQTT 自检失败，未能发送心跳或实时指标。")
     sys.exit(0 if ok else 1)
   parser.print_help()
 
