@@ -829,6 +829,36 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertFalse(ok)
     self.assertIn("not authorised", mqtt_agent.mqtt_publish_error())
 
+  def test_agent_ignores_non_json_mqtt_payloads(self):
+    result = mqtt_agent.handle_payload({
+      "NODE_ID": "node-1",
+      "NODE_NAME": "test7",
+      "COMMAND_SECRET": "secret",
+    }, "Connection Refused: not authorised.")
+
+    self.assertIsNone(result)
+
+  def test_agent_ignores_non_json_mqtt_sub_lines(self):
+    config = {
+      "NODE_ID": "node-1",
+      "MQTT_HOST": "127.0.0.1",
+      "MQTT_USERNAME": "u",
+      "MQTT_PASSWORD": "p",
+      "COMMAND_SECRET": "secret",
+    }
+    process = mock.Mock()
+    process.stdout = iter(["Connection Refused: not authorised.\n"])
+    process.poll.return_value = 0
+
+    with mock.patch("mqtt_agent.load_env", return_value=config):
+      with mock.patch("mqtt_agent.start_status_heartbeat"):
+        with mock.patch("mqtt_agent.subprocess.Popen", return_value=process):
+          with mock.patch("mqtt_agent.time.sleep", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+              mqtt_agent.listen("agent.env")
+
+    process.kill.assert_called_once()
+
   def test_agent_uninstall_command_schedules_cleanup(self):
     with mock.patch("mqtt_agent.delayed_cleanup_agent") as cleanup:
       payload = mqtt_master.sign_command({

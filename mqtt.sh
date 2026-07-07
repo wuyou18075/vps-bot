@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.21}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.22}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -622,6 +622,7 @@ EOF
 register_agent() {
   normalize_paths
   require_root
+  green "VPS MQTT 脚本版本: ${SCRIPT_VERSION}"
   install_dependencies
   install_project_files
 

@@ -450,7 +450,12 @@ def start_status_heartbeat(config):
 
 def handle_payload(config, raw_payload):
   """Verify and execute one command payload."""
-  payload = json.loads(raw_payload)
+  try:
+    payload = json.loads(raw_payload)
+  except json.JSONDecodeError:
+    return None
+  if not isinstance(payload, dict):
+    return None
   if not verify_command_signature(payload, config["COMMAND_SECRET"]):
     return None
   result = execute_allowed_command(config, payload["command"])
