@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.11}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.13}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -291,6 +291,8 @@ save_runtime_settings() {
     --set "MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-vps-bot}" \
     --set "MQTT_MASTER_USER=${MQTT_MASTER_USER:-vps_master}" \
     --set "MQTT_MASTER_PASSWORD=${MQTT_MASTER_PASSWORD:-}" \
+    --set "MOSQUITTO_ACL=${MOSQUITTO_ACL}" \
+    --set "MOSQUITTO_PASSWD=${MOSQUITTO_PASSWD}" \
     --set "WEB_HOST=${WEB_HOST:-}" \
     --set "WEB_PORT=${WEB_PORT:-}"
 }
@@ -473,6 +475,8 @@ setup_master() {
   write_config_value "MQTT_HOST" "$(get_primary_ip)"
   write_config_value "MQTT_PORT" "${mqtt_port}"
   write_config_value "MQTT_TOPIC_PREFIX" "${MQTT_TOPIC_PREFIX:-vps-bot}"
+  write_config_value "MOSQUITTO_ACL" "${MOSQUITTO_ACL}"
+  write_config_value "MOSQUITTO_PASSWD" "${MOSQUITTO_PASSWD}"
   if [ -z "${public_url_input}" ] && [[ "${public_url}" == http://*:* ]]; then
     write_config_value "WEB_HOST" "0.0.0.0"
   else
@@ -630,7 +634,8 @@ register_agent() {
   python3 "${AGENT_FILE}" --config "${AGENT_CONFIG}" register --master-url "${master_url}" --token "${token}" --node-name "${node_name}"
   write_agent_service
   systemctl daemon-reload
-  systemctl enable --now "${PANEL_NAME}-agent.service" >/dev/null 2>&1 || true
+  systemctl enable "${PANEL_NAME}-agent.service" >/dev/null 2>&1 || true
+  systemctl restart "${PANEL_NAME}-agent.service" >/dev/null 2>&1 || true
   green "Agent 已注册并启动。"
 }
 

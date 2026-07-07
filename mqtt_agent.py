@@ -9,6 +9,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -28,6 +29,7 @@ ALLOWED_COMMANDS = {
   "top",
   "uptime",
   "services",
+  "uninstall-agent",
 }
 
 
@@ -233,6 +235,13 @@ def execute_allowed_command(config, text):
     return f"[{node_name}] 运行时间\n{run_command(['uptime'], timeout=10)}"
   if command == "services":
     return f"[{node_name}] 服务\n{run_command(['systemctl', '--no-pager', '--type=service', '--state=running'], timeout=20)}"
+  if command == "uninstall-agent":
+    delayed_cleanup_agent(config)
+    return {
+      "command": "uninstall-agent",
+      "text": f"[{node_name}] 已收到卸载指令，正在清理本机 agent。",
+      "metrics": {},
+    }
   raise ValueError("命令不在白名单")
 
 
@@ -258,6 +267,51 @@ def mqtt_publish(config, topic, payload, retain=False):
   if retain:
     command.append("-r")
   subprocess.run(command, check=False, timeout=20)
+
+
+def cleanup_agent_install(config):
+  """Remove local agent service/config files after a signed uninstall command."""
+  service_file = os.environ.get("VPS_MQTT_AGENT_SERVICE", "/etc/systemd/system/vps-mqtt-agent.service")
+  config_path = config.get("_CONFIG_PATH") or DEFAULT_CONFIG
+  agent_file = os.path.abspath(__file__)
+  install_dir = os.path.dirname(agent_file)
+  subprocess.run(["systemctl", "disable", "--now", "vps-mqtt-agent.service"], check=False, timeout=20)
+  for path in [config_path, service_file, agent_file]:
+    try:
+      if path and os.path.exists(path):
+        os.remove(path)
+    except OSError:
+      pass
+  master_service = subprocess.run(
+    ["systemctl", "is-active", "--quiet", "vps-mqtt-master.service"],
+    check=False,
+    timeout=10,
+  )
+  if master_service.returncode != 0:
+    for path in [os.path.join(install_dir, "mqtt_master.py"), os.path.join(install_dir, "__pycache__")]:
+      try:
+        if os.path.isdir(path):
+          shutil.rmtree(path)
+        elif os.path.exists(path):
+          os.remove(path)
+      except OSError:
+        pass
+  for directory in [os.path.dirname(config_path), install_dir]:
+    try:
+      if directory and os.path.isdir(directory) and not os.listdir(directory):
+        os.rmdir(directory)
+    except OSError:
+      pass
+  subprocess.run(["systemctl", "daemon-reload"], check=False, timeout=20)
+
+
+def delayed_cleanup_agent(config, delay_seconds=2):
+  """Schedule local agent cleanup after the command result has been published."""
+  def worker():
+    time.sleep(delay_seconds)
+    cleanup_agent_install(config)
+
+  threading.Thread(target=worker, daemon=True).start()
 
 
 def publish_status(config):
@@ -302,6 +356,7 @@ def handle_payload(config, raw_payload):
 def listen(config_path=DEFAULT_CONFIG):
   """Listen for signed MQTT commands."""
   config = load_env(config_path)
+  config["_CONFIG_PATH"] = config_path
   publish_status(config)
   topic = mqtt_topic(config, f"commands/{config['NODE_ID']}")
   command = ["mosquitto_sub", *mqtt_base_args(config), "-v", "-t", topic]
@@ -328,9 +383,11 @@ def listen(config_path=DEFAULT_CONFIG):
 
 def register_agent(master_url, token, node_name, config_path=DEFAULT_CONFIG):
   """Register this node against the master web API."""
+  existing = load_env(config_path)
   data = urllib.parse.urlencode({
     "token": token,
     "name": node_name or socket.gethostname(),
+    "existing_node_id": existing.get("NODE_ID", ""),
   }).encode("utf-8")
   request = urllib.request.Request(f"{master_url.rstrip('/')}/api/register", data=data)
   with urllib.request.urlopen(request, timeout=30) as response:

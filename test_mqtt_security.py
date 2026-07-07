@@ -406,6 +406,72 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertIn("1 台", message)
     dispatch.assert_called_once_with(db, {}, first["node_id"], "/snapshot")
 
+  def test_monitor_page_shows_online_nodes_without_snapshot(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("online")
+      db.update_node_status(node["node_id"], "online", "1.1.1.1")
+      handler = object.__new__(mqtt_master.MasterRequestHandler)
+      handler.server = type("Server", (), {"db": db, "config": {}})()
+
+      html = handler.render_monitor("admin")
+
+    self.assertIn("online", html)
+    self.assertIn("暂无", html)
+
+  def test_register_replaces_existing_node_from_same_agent(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      old = db.register_node("old")
+
+      new = mqtt_master.register_node_from_agent(db, {}, {
+        "name": "new",
+        "existing_node_id": old["node_id"],
+      })
+
+      nodes = db.list_nodes()
+
+    self.assertEqual([new["node_id"]], [node["node_id"] for node in nodes])
+    self.assertEqual("new", nodes[0]["name"])
+
+  def test_refresh_mqtt_auth_writes_node_credentials(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      acl = os.path.join(temp_dir, "acl")
+      passwd = os.path.join(temp_dir, "passwd")
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+
+      with mock.patch("mqtt_master.subprocess.run") as run:
+        mqtt_master.refresh_mqtt_auth(db, {
+          "MQTT_TOPIC_PREFIX": "vps-bot",
+          "MQTT_MASTER_USER": "vps_master",
+          "MQTT_MASTER_PASSWORD": "master-pw",
+          "MOSQUITTO_ACL": acl,
+          "MOSQUITTO_PASSWD": passwd,
+        })
+
+      with open(acl, "r", encoding="utf-8") as file:
+        acl_text = file.read()
+
+    self.assertIn(f"topic read vps-bot/commands/{node['node_id']}", acl_text)
+    called_users = [call.args[0][-2] for call in run.call_args_list]
+    self.assertIn("vps_master", called_users)
+    self.assertIn(node["mqtt_username"], called_users)
+
+  def test_delete_node_dispatches_uninstall_before_removing_record(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+
+      with mock.patch("mqtt_master.publish_mqtt") as publish:
+        with mock.patch("mqtt_master.refresh_mqtt_auth"):
+          message = mqtt_master.handle_node_action(db, {}, node["node_id"], "delete")
+
+      self.assertIn("卸载", message)
+      self.assertEqual([], db.list_nodes())
+      payload = json.loads(publish.call_args.args[2])
+      self.assertEqual("/uninstall-agent", payload["command"])
+
   def test_agent_snapshot_command_returns_structured_metrics(self):
     with mock.patch("mqtt_agent.collect_snapshot_metrics") as collect:
       collect.return_value = {
@@ -422,6 +488,47 @@ class MqttSecurityTest(unittest.TestCase):
 
     self.assertEqual("snapshot", result["command"])
     self.assertEqual(1.0, result["metrics"]["monthly_used_gb"])
+
+  def test_agent_registration_sends_existing_node_id(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      config = os.path.join(temp_dir, "agent.env")
+      mqtt_agent.write_env(config, {"NODE_ID": "old-node"})
+
+      with mock.patch("mqtt_agent.urllib.request.urlopen") as open_url:
+        open_url.return_value.__enter__.return_value.read.return_value = json.dumps({
+          "node_id": "new-node",
+          "name": "new",
+          "mqtt_host": "127.0.0.1",
+          "mqtt_port": "1883",
+          "mqtt_username": "u",
+          "mqtt_password": "p",
+          "topic_prefix": "vps-bot",
+          "command_secret": "s",
+        }).encode("utf-8")
+        mqtt_agent.register_agent("http://master", "token", "new", config)
+
+      body = open_url.call_args.args[0].data.decode("utf-8")
+
+    self.assertIn("existing_node_id=old-node", body)
+
+  def test_agent_uninstall_command_schedules_cleanup(self):
+    with mock.patch("mqtt_agent.delayed_cleanup_agent") as cleanup:
+      payload = mqtt_master.sign_command({
+        "id": "cmd-1",
+        "command": "/uninstall-agent",
+        "ts": 1800000000,
+      }, "secret")
+
+      with mock.patch("mqtt_agent.time.time", return_value=1800000000):
+        result = mqtt_agent.handle_payload({
+          "NODE_ID": "node-1",
+          "NODE_NAME": "test7",
+          "COMMAND_SECRET": "secret",
+        }, json.dumps(payload))
+
+    data = json.loads(result)
+    self.assertEqual("uninstall-agent", data["command"])
+    cleanup.assert_called_once()
 
   def test_login_trims_username_and_sets_session_cookie(self):
     with tempfile.TemporaryDirectory() as temp_dir:

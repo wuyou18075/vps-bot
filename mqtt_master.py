@@ -37,6 +37,7 @@ ALLOWED_COMMANDS = {
   "top",
   "uptime",
   "services",
+  "uninstall-agent",
 }
 SUPPORTED_THEMES = {
   "light": "白色",
@@ -225,6 +226,35 @@ def render_mosquitto_acl(topic_prefix, nodes):
       "",
     ])
   return "\n".join(lines).rstrip() + "\n"
+
+
+def refresh_mqtt_auth(db, config):
+  """Rewrite Mosquitto password and ACL files from registered nodes."""
+  acl_path = config.get("MOSQUITTO_ACL", "")
+  passwd_path = config.get("MOSQUITTO_PASSWD", "")
+  if not acl_path or not passwd_path:
+    return False
+  os.makedirs(os.path.dirname(acl_path), mode=0o755, exist_ok=True)
+  os.makedirs(os.path.dirname(passwd_path), mode=0o755, exist_ok=True)
+  nodes = db.list_nodes()
+  with open(acl_path, "w", encoding="utf-8") as file:
+    file.write(render_mosquitto_acl(config.get("MQTT_TOPIC_PREFIX", DEFAULT_TOPIC_PREFIX), nodes))
+  open(passwd_path, "w", encoding="utf-8").close()
+  os.chmod(acl_path, 0o600)
+  os.chmod(passwd_path, 0o600)
+  users = [(
+    config.get("MQTT_MASTER_USER", "vps_master"),
+    config.get("MQTT_MASTER_PASSWORD", ""),
+  )]
+  users.extend((node["mqtt_username"], node["mqtt_password"]) for node in nodes)
+  for username, password in users:
+    subprocess.run(
+      ["mosquitto_passwd", "-b", passwd_path, username, password],
+      check=False,
+      capture_output=True,
+    )
+  subprocess.run(["systemctl", "reload", "mosquitto"], check=False, capture_output=True)
+  return True
 
 
 def load_env(path=DEFAULT_CONFIG):
@@ -597,7 +627,10 @@ def publish_mqtt(config, topic, payload):
     "-t", topic,
     "-m", payload,
   ]
-  subprocess.run(command, check=False, timeout=20)
+  try:
+    subprocess.run(command, check=False, timeout=20)
+  except (FileNotFoundError, subprocess.TimeoutExpired):
+    return
 
 
 def mqtt_base_args(config):
@@ -856,6 +889,16 @@ def create_registration_command_for_web(db, config, name=""):
   )
 
 
+def register_node_from_agent(db, config, form):
+  """Register an agent and replace its previous node record when provided."""
+  existing_node_id = (form.get("existing_node_id") or "").strip()
+  if existing_node_id:
+    db.delete_node(existing_node_id)
+  node = db.register_node(form.get("name", "vps"))
+  refresh_mqtt_auth(db, config)
+  return node
+
+
 def handle_node_action(db, config, node_id, action):
   """Handle a node operation from the web panel."""
   node = next((item for item in db.list_nodes() if item["node_id"] == node_id), None)
@@ -866,9 +909,14 @@ def handle_node_action(db, config, node_id, action):
     db.audit("web", "node_offline", node["name"])
     return f"[{node['name']}] 已标记离线。"
   if action == "delete":
+    try:
+      dispatch_command(db, config, node_id, "/uninstall-agent")
+    except ValueError:
+      pass
     db.delete_node(node_id)
+    refresh_mqtt_auth(db, config)
     db.audit("web", "node_delete", node["name"])
-    return f"[{node['name']}] 已删除。"
+    return f"[{node['name']}] 已发送卸载指令并已删除记录。"
   if action == "refresh":
     dispatch_command(db, config, node_id, "/status")
     return f"[{node['name']}] 已发送更新请求。"
@@ -1572,7 +1620,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       self.send_response(403)
       self.end_headers()
       return
-    node = self.db.register_node(form.get("name", "vps"))
+    node = register_node_from_agent(self.db, self.config, form)
     response = {
       **node,
       "mqtt_host": self.config.get("MQTT_HOST", "127.0.0.1"),
