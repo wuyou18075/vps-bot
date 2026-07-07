@@ -326,6 +326,52 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertIn("--master-url 'http://1.2.3.4:8088'", command)
     self.assertIn("--node-name 'hk'", command)
 
+  def test_refresh_mqtt_auth_reapplies_permissions_after_password_update(self):
+    events = []
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.register_node("test7")
+      config = {
+        "MOSQUITTO_ACL": os.path.join(temp_dir, "acl"),
+        "MOSQUITTO_PASSWD": os.path.join(temp_dir, "passwd"),
+        "MQTT_MASTER_PASSWORD": "master-secret",
+      }
+
+      def record_permissions(*_):
+        events.append("permissions")
+
+      def record_run(command, **_):
+        events.append(f"run:{command[0]}")
+        return type("Result", (), {"returncode": 0, "stdout": b"", "stderr": b""})()
+
+      with mock.patch("mqtt_master.set_mosquitto_file_permissions", side_effect=record_permissions):
+        with mock.patch("mqtt_master.subprocess.run", side_effect=record_run):
+          ok, detail = mqtt_master.refresh_mqtt_auth(db, config)
+
+    self.assertTrue(ok, detail)
+    last_password_write = max(index for index, event in enumerate(events) if event == "run:mosquitto_passwd")
+    last_permissions = max(index for index, event in enumerate(events) if event == "permissions")
+    self.assertGreater(last_permissions, last_password_write)
+
+  def test_refresh_mqtt_auth_generates_missing_master_password(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      config = {
+        "MOSQUITTO_ACL": os.path.join(temp_dir, "acl"),
+        "MOSQUITTO_PASSWD": os.path.join(temp_dir, "passwd"),
+        "MQTT_MASTER_PASSWORD": "",
+      }
+
+      with mock.patch("mqtt_master.set_mosquitto_file_permissions"):
+        with mock.patch("mqtt_master.subprocess.run") as run:
+          run.return_value = type("Result", (), {"returncode": 0, "stdout": b"", "stderr": b""})()
+          ok, detail = mqtt_master.refresh_mqtt_auth(db, config)
+
+      self.assertTrue(ok, detail)
+      self.assertTrue(config["MQTT_MASTER_PASSWORD"])
+      self.assertEqual(config["MQTT_MASTER_PASSWORD"], db.get_setting("MQTT_MASTER_PASSWORD"))
+
   def test_node_actions_can_mark_offline_and_delete(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))

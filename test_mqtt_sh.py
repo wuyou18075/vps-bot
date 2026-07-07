@@ -177,6 +177,70 @@ EOF
     self.assertIn("chmod 640", write_body)
     self.assertIn("chown root:mosquitto", write_body)
     self.assertIn("mosquitto_passwd -b -c", write_body)
+    self.assertIn("set_mosquitto_permissions", write_body.split("mosquitto_passwd -b -c", 1)[1])
+
+  def test_mosquitto_persistence_uses_broker_accessible_directory(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      CONFIG_DIR=/tmp/vps-mqtt-persist-config
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      STATE_DIR=/tmp/vps-mqtt-private-state
+      MOSQUITTO_CONF=/tmp/vps-mqtt-persist.conf
+      MOSQUITTO_ACL=/tmp/vps-mqtt-persist.acl
+      MOSQUITTO_PASSWD=/tmp/vps-mqtt-persist.passwd
+      MOSQUITTO_PERSIST_DIR=/tmp/vps-mqtt-broker-persist
+      mosquitto_passwd() { :; }
+      id() { return 1; }
+      write_mosquitto_files
+      cat "${MOSQUITTO_CONF}"
+      cat "${CONFIG_FILE}"
+    """)
+
+    output = self.run_bash(script)
+
+    with open("mqtt.sh", "r", encoding="utf-8") as file:
+      self.assertIn('MOSQUITTO_PERSIST_DIR="${MOSQUITTO_PERSIST_DIR:-/var/lib/mosquitto/${PANEL_NAME}}"', file.read())
+    self.assertIn("persistence_location /tmp/vps-mqtt-broker-persist/", output)
+    self.assertIn('MOSQUITTO_PERSIST_DIR="/tmp/vps-mqtt-broker-persist"', output)
+    self.assertNotIn("persistence_location /tmp/vps-mqtt-private-state/mosquitto/", output)
+
+  def test_repair_master_rewrites_mqtt_and_services(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      suffix="$$"
+      CONFIG_DIR="/tmp/vps-mqtt-repair-config-${suffix}"
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      INSTALL_DIR="/tmp/vps-mqtt-repair-install-${suffix}"
+      STATE_DIR="/tmp/vps-mqtt-repair-state-${suffix}"
+      SERVICE_FILE="/tmp/vps-mqtt-repair-${suffix}.service"
+      NGINX_FILE="/tmp/vps-mqtt-repair-nginx-${suffix}.conf"
+      NGINX_LINK="/tmp/vps-mqtt-repair-nginx-${suffix}.link"
+      MOSQUITTO_CONF="/tmp/vps-mqtt-repair-mosquitto-${suffix}.conf"
+      MOSQUITTO_ACL="/tmp/vps-mqtt-repair-${suffix}.acl"
+      MOSQUITTO_PASSWD="/tmp/vps-mqtt-repair-${suffix}.passwd"
+      MOSQUITTO_PERSIST_DIR="/tmp/vps-mqtt-repair-persist-${suffix}"
+      install_dependencies() { :; }
+      systemctl() { printf '%s\\n' "$*" >> /tmp/vps-mqtt-repair-systemctl.log; }
+      check_mqtt_health() { printf '%s\\n' mqtt-health; }
+      check_web_health() { printf '%s\\n' web-health; }
+      save_runtime_settings() { printf '%s\\n' save-settings; }
+      mosquitto_passwd() { :; }
+      cp() { command cp "$@"; }
+      repair_master
+      cat "${MOSQUITTO_CONF}"
+      printf '%s\\n' '---SERVICE---'
+      cat "${SERVICE_FILE}"
+      printf '%s\\n' '---SYSTEMCTL---'
+      cat /tmp/vps-mqtt-repair-systemctl.log
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("password_file /tmp/vps-mqtt-repair-", output)
+    self.assertIn("persistence_location /tmp/vps-mqtt-repair-persist-", output)
+    self.assertIn("ExecStart=/usr/bin/python3 /tmp/vps-mqtt-repair-install-", output)
+    self.assertIn("restart mosquitto", output)
+    self.assertIn("restart vps-mqtt-master.service", output)
 
   def test_setup_master_defaults_public_url_to_ip_port(self):
     script = textwrap.dedent("""

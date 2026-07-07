@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.27}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.28}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -18,7 +18,12 @@ NGINX_LINK="${NGINX_LINK:-/etc/nginx/sites-enabled/${PANEL_NAME}.conf}"
 MOSQUITTO_CONF="${MOSQUITTO_CONF:-/etc/mosquitto/conf.d/${PANEL_NAME}.conf}"
 MOSQUITTO_ACL="${MOSQUITTO_ACL:-/etc/mosquitto/${PANEL_NAME}.acl}"
 MOSQUITTO_PASSWD="${MOSQUITTO_PASSWD:-/etc/mosquitto/${PANEL_NAME}.passwd}"
+MOSQUITTO_PERSIST_DIR="${MOSQUITTO_PERSIST_DIR:-/var/lib/mosquitto/${PANEL_NAME}}"
 AGENT_CONFIG="${AGENT_CONFIG:-${CONFIG_DIR}/agent.env}"
+
+if [ "${VPS_MQTT_TESTING}" = "1" ] && [ "${MOSQUITTO_PERSIST_DIR}" = "/var/lib/mosquitto/${PANEL_NAME}" ]; then
+  MOSQUITTO_PERSIST_DIR="/tmp/${PANEL_NAME}-mosquitto"
+fi
 
 red() {
   printf "\033[31m%s\033[0m\n" "$1"
@@ -57,11 +62,22 @@ pause() {
 }
 
 load_config() {
+  local default_mosquitto_acl="${MOSQUITTO_ACL:-/etc/mosquitto/${PANEL_NAME}.acl}"
+  local default_mosquitto_passwd="${MOSQUITTO_PASSWD:-/etc/mosquitto/${PANEL_NAME}.passwd}"
+  local default_mosquitto_persist_dir="${MOSQUITTO_PERSIST_DIR:-/var/lib/mosquitto/${PANEL_NAME}}"
+
   unset PUBLIC_URL MQTT_HOST MQTT_LOCAL_HOST MQTT_PORT MQTT_TOPIC_PREFIX WEB_HOST WEB_PORT
   unset MQTT_MASTER_USER MQTT_MASTER_PASSWORD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+  unset MOSQUITTO_ACL MOSQUITTO_PASSWD MOSQUITTO_PERSIST_DIR
   if [ -f "${CONFIG_FILE}" ]; then
     # shellcheck disable=SC1090
     source "${CONFIG_FILE}"
+  fi
+  MOSQUITTO_ACL="${MOSQUITTO_ACL:-${default_mosquitto_acl}}"
+  MOSQUITTO_PASSWD="${MOSQUITTO_PASSWD:-${default_mosquitto_passwd}}"
+  MOSQUITTO_PERSIST_DIR="${MOSQUITTO_PERSIST_DIR:-${default_mosquitto_persist_dir}}"
+  if is_testing && [ "${MOSQUITTO_PERSIST_DIR}" = "/var/lib/mosquitto/${PANEL_NAME}" ]; then
+    MOSQUITTO_PERSIST_DIR="/tmp/${PANEL_NAME}-mosquitto"
   fi
 }
 
@@ -411,18 +427,20 @@ EOF
 write_mosquitto_files() {
   local master_password="${MQTT_MASTER_PASSWORD:-$(random_secret)}"
   local mqtt_port="${MQTT_PORT:-1883}"
+  local persist_dir="${MOSQUITTO_PERSIST_DIR%/}"
 
   write_config_value "MQTT_MASTER_USER" "vps_master"
   write_config_value "MQTT_MASTER_PASSWORD" "${master_password}"
+  write_config_value "MOSQUITTO_PERSIST_DIR" "${persist_dir}"
 
-  mkdir -p "$(dirname "${MOSQUITTO_CONF}")" "$(dirname "${MOSQUITTO_ACL}")" "$(dirname "${MOSQUITTO_PASSWD}")" "${STATE_DIR}/mosquitto/"
+  mkdir -p "$(dirname "${MOSQUITTO_CONF}")" "$(dirname "${MOSQUITTO_ACL}")" "$(dirname "${MOSQUITTO_PASSWD}")" "${persist_dir}/"
   cat > "${MOSQUITTO_CONF}" <<EOF
 listener ${mqtt_port} 0.0.0.0
 allow_anonymous false
 password_file ${MOSQUITTO_PASSWD}
 acl_file ${MOSQUITTO_ACL}
 persistence true
-persistence_location ${STATE_DIR}/mosquitto/
+persistence_location ${persist_dir}/
 EOF
 
   cat > "${MOSQUITTO_ACL}" <<EOF
@@ -431,11 +449,22 @@ topic readwrite ${MQTT_TOPIC_PREFIX:-vps-bot}/#
 EOF
 
   touch "${MOSQUITTO_PASSWD}"
+  set_mosquitto_permissions "${persist_dir}"
+  mosquitto_passwd -b -c "${MOSQUITTO_PASSWD}" vps_master "${master_password}" >/dev/null
+  set_mosquitto_permissions "${persist_dir}"
+}
+
+set_mosquitto_permissions() {
+  local persist_dir="${1:-${MOSQUITTO_PERSIST_DIR%/}}"
+
   chmod 640 "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}"
   if id mosquitto >/dev/null 2>&1; then
     chown root:mosquitto "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}" 2>/dev/null || true
+    chown mosquitto:mosquitto "${persist_dir}" 2>/dev/null || true
+    chmod 750 "${persist_dir}" 2>/dev/null || true
+  else
+    chmod 755 "${persist_dir}" 2>/dev/null || true
   fi
-  mosquitto_passwd -b -c "${MOSQUITTO_PASSWD}" vps_master "${master_password}" >/dev/null
 }
 
 write_master_service() {
@@ -559,6 +588,50 @@ deploy_web() {
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
   green "Web 页面已部署。"
   pause
+}
+
+repair_master() {
+  normalize_paths
+  require_root
+  green "VPS MQTT 脚本版本: ${SCRIPT_VERSION}"
+  install_dependencies
+  install_project_files
+  load_config
+
+  if [ -z "${MQTT_HOST:-}" ]; then
+    write_config_value "MQTT_HOST" "$(get_primary_ip)"
+  fi
+  if [ -z "${MQTT_PORT:-}" ]; then
+    write_config_value "MQTT_PORT" "1883"
+  fi
+  if [ -z "${MQTT_TOPIC_PREFIX:-}" ]; then
+    write_config_value "MQTT_TOPIC_PREFIX" "vps-bot"
+  fi
+  if [ -z "${WEB_PORT:-}" ]; then
+    write_config_value "WEB_PORT" "8088"
+  fi
+  if [ -z "${WEB_HOST:-}" ]; then
+    write_config_value "WEB_HOST" "0.0.0.0"
+  fi
+  write_config_value "MOSQUITTO_ACL" "${MOSQUITTO_ACL}"
+  write_config_value "MOSQUITTO_PASSWD" "${MOSQUITTO_PASSWD}"
+  write_config_value "MOSQUITTO_PERSIST_DIR" "${MOSQUITTO_PERSIST_DIR%/}"
+
+  load_config
+  write_mosquitto_files
+  load_config
+  save_runtime_settings
+  write_master_service
+  write_nginx_config
+
+  systemctl daemon-reload
+  systemctl enable mosquitto >/dev/null 2>&1 || true
+  systemctl restart mosquitto
+  systemctl restart "${PANEL_NAME}-master.service"
+  systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+  check_mqtt_health "127.0.0.1"
+  check_web_health
+  green "主控 MQTT 配置已修复并重启。"
 }
 
 generate_registration_command() {
@@ -723,6 +796,9 @@ main_menu() {
 if [ "${1:-}" = "register-agent" ]; then
   shift
   register_agent "$@"
+elif [ "${1:-}" = "repair-master" ]; then
+  shift
+  repair_master "$@"
 elif [ "${VPS_MQTT_TESTING:-0}" != "1" ]; then
   main_menu
 fi

@@ -271,6 +271,15 @@ def refresh_mqtt_auth(db, config):
   acl_path = config.get("MOSQUITTO_ACL", "") or DEFAULT_MOSQUITTO_ACL
   passwd_path = config.get("MOSQUITTO_PASSWD", "") or DEFAULT_MOSQUITTO_PASSWD
   nodes = db.list_nodes()
+  master_user = config.get("MQTT_MASTER_USER", "vps_master") or "vps_master"
+  master_password = config.get("MQTT_MASTER_PASSWORD", "")
+  if not master_password:
+    master_password = random_token(24)
+    config["MQTT_MASTER_USER"] = master_user
+    config["MQTT_MASTER_PASSWORD"] = master_password
+    if hasattr(db, "set_setting"):
+      db.set_setting("MQTT_MASTER_USER", master_user)
+      db.set_setting("MQTT_MASTER_PASSWORD", master_password)
   try:
     os.makedirs(os.path.dirname(acl_path), mode=0o755, exist_ok=True)
     os.makedirs(os.path.dirname(passwd_path), mode=0o755, exist_ok=True)
@@ -280,25 +289,32 @@ def refresh_mqtt_auth(db, config):
     set_mosquitto_file_permissions(acl_path, passwd_path)
   except OSError as error:
     return False, f"写入 ACL/Passwd 文件失败：{error}"
-  users = [(
-    config.get("MQTT_MASTER_USER", "vps_master"),
-    config.get("MQTT_MASTER_PASSWORD", ""),
-  )]
+  users = [(master_user, master_password)]
   users.extend((node["mqtt_username"], node["mqtt_password"]) for node in nodes)
   for index, (username, password) in enumerate(users):
     command = ["mosquitto_passwd", "-b"]
     if index == 0:
       command.append("-c")
     command.extend([passwd_path, username, password])
-    result = subprocess.run(
-      command,
-      check=False,
-      capture_output=True,
-    )
+    try:
+      result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+      )
+    except FileNotFoundError:
+      return False, f"命令不存在：{command[0]}"
     if command_failed(result):
       detail = _format_command_failure(result, command)
       return False, f"mosquitto_passwd 为 {username} 账号失败：{detail}"
-  restart = subprocess.run(["systemctl", "restart", "mosquitto"], check=False, capture_output=True)
+  try:
+    set_mosquitto_file_permissions(acl_path, passwd_path)
+  except OSError as error:
+    return False, f"设置 ACL/Passwd 文件权限失败：{error}"
+  try:
+    restart = subprocess.run(["systemctl", "restart", "mosquitto"], check=False, capture_output=True)
+  except FileNotFoundError:
+    return False, "命令不存在：systemctl"
   if command_failed(restart):
     detail = _format_command_failure(restart, ["systemctl", "restart", "mosquitto"])
     return False, f"重启 mosquitto 失败：{detail}"
