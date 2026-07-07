@@ -1058,6 +1058,15 @@ def create_registration_command(config_path=DEFAULT_CONFIG, db_path=DEFAULT_DB, 
   )
 
 
+def create_admin_user(db_path, username, password):
+  """Create or reset the web administrator account."""
+  if len(password) < 12:
+    raise ValueError("管理员密码至少 12 位")
+  db = MasterDatabase(db_path)
+  db.create_admin(username.strip() or "admin", password)
+  db.audit(username.strip() or "admin", "create_admin", "installer")
+
+
 def sh_quote(value):
   """Return a single-quoted shell token."""
   return "'" + value.replace("'", "'\"'\"'") + "'"
@@ -1072,6 +1081,8 @@ def main():
   sub.add_parser("serve")
   token_parser = sub.add_parser("registration-command")
   token_parser.add_argument("--name", default="")
+  admin_parser = sub.add_parser("create-admin")
+  admin_parser.add_argument("--username", default="admin")
   args = parser.parse_args()
 
   if args.command == "serve":
@@ -1079,6 +1090,11 @@ def main():
     return
   if args.command == "registration-command":
     print(create_registration_command(args.config, args.db, args.name))
+    return
+  if args.command == "create-admin":
+    password = os.environ.get("VPS_MQTT_ADMIN_PASSWORD", "")
+    create_admin_user(args.db, args.username, password)
+    print(f"管理员已创建: {args.username}")
     return
   parser.print_help()
 

@@ -136,12 +136,16 @@ class MqttShellTest(unittest.TestCase):
       install_dependencies() { :; }
       systemctl() { :; }
       check_web_health() { printf '%s\\n' health-ok; }
+      create_web_admin() { printf 'admin:%s\\n' "$1"; }
       mosquitto_passwd() { printf '%s %s %s\\n' "$@" >> /tmp/vps-mqtt-passwd-calls; }
       cp() { command cp "$@"; }
       setup_master <<'EOF'
 https://panel.example.com
 1883
 8088
+admin
+secret-password-123
+secret-password-123
 EOF
       cat "${CONFIG_FILE}"
       printf '%s\\n' '---SERVICE---'
@@ -159,6 +163,7 @@ EOF
     self.assertIn("ExecStart=/usr/bin/python3 /tmp/vps-mqtt-test-install/mqtt_master.py --config /tmp/vps-mqtt-test-config/config.env serve", output)
     self.assertIn("password_file /tmp/vps-mqtt-passwd", output)
     self.assertIn("acl_file /tmp/vps-mqtt-acl", output)
+    self.assertIn("admin:admin", output)
     self.assertIn("health-ok", output)
 
   def test_setup_master_defaults_public_url_to_ip_port(self):
@@ -177,12 +182,16 @@ EOF
       install_dependencies() { :; }
       systemctl() { :; }
       check_web_health() { :; }
+      create_web_admin() { :; }
       mosquitto_passwd() { :; }
       cp() { command cp "$@"; }
       setup_master <<'EOF'
 
 1883
 9090
+admin
+secret-password-123
+secret-password-123
 EOF
       cat "${CONFIG_FILE}"
     """)
@@ -191,6 +200,28 @@ EOF
 
     self.assertIn('PUBLIC_URL="http://5.6.7.8:9090"', output)
     self.assertIn('WEB_HOST="0.0.0.0"', output)
+
+  def test_setup_master_rejects_mismatched_admin_passwords(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      CONFIG_DIR=/tmp/vps-mqtt-test-password-mismatch
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      INSTALL_DIR=/tmp/vps-mqtt-test-password-mismatch-install
+      STATE_DIR=/tmp/vps-mqtt-test-password-mismatch-state
+      install_dependencies() { :; }
+      setup_master <<'EOF'
+
+1883
+8088
+admin
+secret-password-123
+different-password-123
+EOF
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("两次输入的密码不一致", output)
 
   def test_check_web_health_reports_failure(self):
     script = textwrap.dedent("""

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.4}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.5}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -273,6 +273,14 @@ check_web_health() {
   return 0
 }
 
+create_web_admin() {
+  local username="$1"
+  local password="$2"
+
+  VPS_MQTT_ADMIN_PASSWORD="${password}" \
+    python3 "${MASTER_FILE}" --config "${CONFIG_FILE}" --db "${STATE_DIR}/master.db" create-admin --username "${username}"
+}
+
 get_registered_node_count() {
   if [ ! -f "${STATE_DIR}/master.db" ]; then
     printf "0\n"
@@ -415,20 +423,38 @@ EOF
 setup_master() {
   normalize_paths
   require_root
-  install_dependencies
-  install_project_files
   load_config
 
   local public_url
   local public_url_input
   local mqtt_port
   local web_port
+  local admin_username
+  local admin_password
+  local admin_password_confirm
   read -r -p "请输入 Web 公网地址，例如 https://panel.example.com；无域名直接回车使用 IP:端口 [${PUBLIC_URL:-}]: " public_url_input
   read -r -p "请输入 MQTT 端口 [${MQTT_PORT:-1883}]: " mqtt_port
   mqtt_port="${mqtt_port:-${MQTT_PORT:-1883}}"
   read -r -p "请输入 Web 本地端口 [${WEB_PORT:-8088}]: " web_port
   web_port="${web_port:-${WEB_PORT:-8088}}"
+  read -r -p "请输入 Web 管理员用户名 [admin]: " admin_username
+  admin_username="${admin_username:-admin}"
+  read -r -s -p "请输入 Web 管理员密码（至少 12 位）: " admin_password
+  printf "\n"
+  read -r -s -p "请再次输入 Web 管理员密码: " admin_password_confirm
+  printf "\n"
+  if [ "${admin_password}" != "${admin_password_confirm}" ]; then
+    red "两次输入的密码不一致。"
+    return
+  fi
+  if [ "${#admin_password}" -lt 12 ]; then
+    red "Web 管理员密码至少 12 位。"
+    return
+  fi
   public_url="${public_url_input:-${PUBLIC_URL:-http://$(get_primary_ip):${web_port}}}"
+
+  install_dependencies
+  install_project_files
 
   write_config_value "PUBLIC_URL" "${public_url}"
   write_config_value "RAW_BASE_URL" "${RAW_BASE_URL}"
@@ -443,6 +469,7 @@ setup_master() {
   write_config_value "WEB_PORT" "${web_port}"
 
   load_config
+  create_web_admin "${admin_username}" "${admin_password}"
   write_mosquitto_files
   write_master_service
   write_nginx_config
@@ -453,7 +480,7 @@ setup_master() {
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
   check_web_health
 
-  green "MQTT 主控服务已安装。Web 首次访问 ${public_url} 后创建管理员，并绑定 Google Authenticator。"
+  green "MQTT 主控服务已安装。Web 首次访问 ${public_url}，使用账号 ${admin_username} 登录后绑定 Google Authenticator。"
 }
 
 deploy_web() {

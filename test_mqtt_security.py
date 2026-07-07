@@ -101,6 +101,17 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertNotEqual(first["mqtt_password"], second["mqtt_password"])
     self.assertNotEqual(first["command_secret"], second["command_secret"])
 
+  def test_create_admin_user_stores_hashed_password(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db_path = os.path.join(temp_dir, "master.db")
+      mqtt_master.create_admin_user(db_path, "admin", "long-password-123")
+      db = mqtt_master.MasterDatabase(db_path)
+      user = db.get_user("admin")
+
+    self.assertIsNotNone(user)
+    self.assertNotEqual("long-password-123", user["password_hash"])
+    self.assertTrue(mqtt_master.verify_password("long-password-123", user["password_hash"]))
+
   def test_telegram_nodes_lists_registered_vps(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
