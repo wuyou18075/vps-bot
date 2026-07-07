@@ -446,6 +446,48 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertIn("offline", html)
     self.assertIn("暂无", html)
 
+  def test_monitor_page_uses_live_event_stream(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      handler = object.__new__(mqtt_master.MasterRequestHandler)
+      handler.server = type("Server", (), {"db": db, "config": {}})()
+
+      html = handler.render_monitor("admin")
+
+    self.assertIn("EventSource", html)
+    self.assertIn("/events/monitor", html)
+    self.assertIn("/api/monitor", html)
+
+  def test_monitor_payload_contains_nodes_and_state(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+      db.update_node_status(node["node_id"], "online", "1.1.1.1")
+      db.store_command_result({
+        "id": "cmd-1",
+        "node_id": node["node_id"],
+        "command": "snapshot",
+        "ok": True,
+        "text": "ok",
+        "metrics": {
+          "monthly_used_gb": 2,
+          "daily_used_gb": 0.2,
+          "network_rx_mbps": 3,
+          "network_tx_mbps": 1,
+          "cpu_percent": 20,
+          "memory_percent": 30,
+          "latency_ms": 40,
+        },
+        "ts": 1800000000,
+      })
+
+      payload = mqtt_master.monitor_payload(db)
+
+    self.assertEqual("未运行", payload["monitor_state"])
+    self.assertEqual("test7", payload["nodes"][0]["name"])
+    self.assertEqual("online", payload["nodes"][0]["status"])
+    self.assertEqual(2.0, payload["nodes"][0]["monthly_used_gb"])
+
   def test_register_replaces_existing_node_from_same_agent(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))

@@ -966,6 +966,33 @@ def request_snapshot(db, config, online_only=True):
   return f"已向 {len(nodes)} 台{scope}请求快照。"
 
 
+def monitor_payload(db):
+  """Return the current monitor state as JSON-serializable data."""
+  now = int(time.time())
+  monitor_until = int(db.get_setting("monitor_until", "0") or "0")
+  nodes = []
+  for item in db.latest_node_snapshots():
+    nodes.append({
+      "name": item.get("name") or "",
+      "group_name": item.get("group_name") or "未分组",
+      "status": item.get("status") or "offline",
+      "monthly_used_gb": float(item.get("monthly_used_gb") or 0),
+      "traffic_total_gb": float(item.get("traffic_total_gb") or 0),
+      "daily_used_gb": float(item.get("daily_used_gb") or 0),
+      "network_rx_mbps": float(item.get("network_rx_mbps") or 0),
+      "network_tx_mbps": float(item.get("network_tx_mbps") or 0),
+      "cpu_percent": float(item.get("cpu_percent") or 0),
+      "memory_percent": float(item.get("memory_percent") or 0),
+      "latency_ms": float(item.get("latency_ms") or 0),
+      "snapshot_ts": int(item.get("snapshot_ts") or 0),
+    })
+  return {
+    "monitor_state": "运行中" if monitor_until > now else "未运行",
+    "server_ts": now,
+    "nodes": nodes,
+  }
+
+
 def dynamic_monitor_loop(db, config, until_ts, interval_seconds=60):
   """Request snapshots periodically until the configured deadline."""
   while int(time.time()) < until_ts:
@@ -1138,9 +1165,38 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     self.send_header("X-Frame-Options", "DENY")
     self.send_header("X-Content-Type-Options", "nosniff")
     self.send_header("Referrer-Policy", "no-referrer")
-    self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'")
+    self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
     self.end_headers()
     self.wfile.write(payload)
+
+  def send_json(self, data, status=200):
+    """Send a JSON response with security headers."""
+    payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    self.send_response(status)
+    self.send_header("Content-Type", "application/json; charset=utf-8")
+    self.send_header("Content-Length", str(len(payload)))
+    self.send_header("X-Content-Type-Options", "nosniff")
+    self.send_header("Cache-Control", "no-store")
+    self.end_headers()
+    self.wfile.write(payload)
+
+  def send_monitor_events(self):
+    """Stream monitor updates to the browser with Server-Sent Events."""
+    self.send_response(200)
+    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    self.send_header("Cache-Control", "no-cache")
+    self.send_header("Connection", "keep-alive")
+    self.send_header("X-Accel-Buffering", "no")
+    self.end_headers()
+    deadline = time.time() + 300
+    while time.time() < deadline:
+      payload = json.dumps(monitor_payload(self.db), ensure_ascii=False)
+      try:
+        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+        self.wfile.flush()
+      except (BrokenPipeError, ConnectionResetError):
+        return
+      time.sleep(3)
 
   def is_https_request(self):
     """Return whether the original request used HTTPS."""
@@ -1262,6 +1318,18 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       if not user:
         return
       self.send_html(self.render_monitor(user))
+      return
+    if self.path == "/api/monitor":
+      user = self.require_user()
+      if not user:
+        return
+      self.send_json(monitor_payload(self.db))
+      return
+    if self.path == "/events/monitor":
+      user = self.require_user()
+      if not user:
+        return
+      self.send_monitor_events()
       return
     self.send_error(404)
 
@@ -1533,7 +1601,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
 <div class="topbar">
   <div>
     <h1>VPS 监控展示</h1>
-    <p class="muted">动态监控: {state}</p>
+    <p class="muted">动态监控: <span id="monitor-state">{state}</span></p>
   </div>
   <div class="toolbar">
     <a href="/">返回面板</a>
@@ -1545,8 +1613,58 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   </div>
 </div>
 <section class="panel">
-  <table><thead><tr><th>节点</th><th>状态</th><th>流量</th><th>网速</th><th>CPU</th><th>内存</th><th>延迟</th><th>更新时间</th></tr></thead><tbody>{rows}</tbody></table>
-</section>""")
+  <table><thead><tr><th>节点</th><th>状态</th><th>流量</th><th>网速</th><th>CPU</th><th>内存</th><th>延迟</th><th>更新时间</th></tr></thead><tbody id="monitor-body">{rows}</tbody></table>
+</section>
+<script>
+(() => {{
+  const body = document.getElementById("monitor-body");
+  const state = document.getElementById("monitor-state");
+  const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({{
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\\"": "&quot;",
+    "'": "&#39;",
+  }}[char]));
+  const fixed = (value, digits = 2) => Number(value || 0).toFixed(digits);
+  const timeText = (seconds) => {{
+    if (!seconds) return "暂无";
+    return new Date(seconds * 1000).toLocaleString("zh-CN", {{ hour12: false }});
+  }};
+  const row = (item) => `
+    <tr>
+      <td><strong>${{esc(item.name)}}</strong><br><span class="muted">${{esc(item.group_name || "未分组")}}</span></td>
+      <td><span class="badge ${{item.status === "online" ? "ok" : ""}}">${{esc(item.status || "offline")}}</span></td>
+      <td>${{fixed(item.monthly_used_gb)}} / ${{fixed(item.traffic_total_gb)}} GB<br><span class="muted">今日 ${{fixed(item.daily_used_gb)}} GB</span></td>
+      <td>↓ ${{fixed(item.network_rx_mbps)}} Mbps<br>↑ ${{fixed(item.network_tx_mbps)}} Mbps</td>
+      <td>${{fixed(item.cpu_percent, 1)}}%</td>
+      <td>${{fixed(item.memory_percent, 1)}}%</td>
+      <td>${{fixed(item.latency_ms, 1)}} ms</td>
+      <td>${{timeText(item.snapshot_ts)}}</td>
+    </tr>`;
+  const render = (data) => {{
+    state.textContent = data.monitor_state || "未运行";
+    body.innerHTML = (data.nodes || []).map(row).join("");
+  }};
+  let fallbackTimer = null;
+  const poll = async () => {{
+    const response = await fetch("/api/monitor", {{ cache: "no-store" }});
+    if (response.ok) render(await response.json());
+  }};
+  const startFallback = () => {{
+    if (fallbackTimer) return;
+    poll();
+    fallbackTimer = setInterval(poll, 5000);
+  }};
+  if ("EventSource" in window) {{
+    const stream = new EventSource("/events/monitor");
+    stream.onmessage = (event) => render(JSON.parse(event.data));
+    stream.onerror = startFallback;
+  }} else {{
+    startFallback();
+  }}
+}})();
+</script>""")
 
   def handle_telegram(self, user):
     """Save Telegram settings."""
