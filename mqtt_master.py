@@ -263,7 +263,11 @@ def render_mosquitto_acl(topic_prefix, nodes):
 
 
 def refresh_mqtt_auth(db, config):
-  """Rewrite Mosquitto password and ACL files from registered nodes."""
+  """Rewrite Mosquitto password and ACL files from registered nodes.
+
+  Returns ``(True, "")`` on success, or ``(False, detail)`` with the first
+  failure reason so callers can surface a useful error to the operator.
+  """
   acl_path = config.get("MOSQUITTO_ACL", "") or DEFAULT_MOSQUITTO_ACL
   passwd_path = config.get("MOSQUITTO_PASSWD", "") or DEFAULT_MOSQUITTO_PASSWD
   nodes = db.list_nodes()
@@ -274,8 +278,8 @@ def refresh_mqtt_auth(db, config):
       file.write(render_mosquitto_acl(config.get("MQTT_TOPIC_PREFIX", DEFAULT_TOPIC_PREFIX), nodes))
     open(passwd_path, "w", encoding="utf-8").close()
     set_mosquitto_file_permissions(acl_path, passwd_path)
-  except OSError:
-    return False
+  except OSError as error:
+    return False, f"写入 ACL/Passwd 文件失败：{error}"
   users = [(
     config.get("MQTT_MASTER_USER", "vps_master"),
     config.get("MQTT_MASTER_PASSWORD", ""),
@@ -292,11 +296,25 @@ def refresh_mqtt_auth(db, config):
       capture_output=True,
     )
     if command_failed(result):
-      return False
+      detail = _format_command_failure(result, command)
+      return False, f"mosquitto_passwd 为 {username} 账号失败：{detail}"
   restart = subprocess.run(["systemctl", "restart", "mosquitto"], check=False, capture_output=True)
   if command_failed(restart):
-    return False
-  return True
+    detail = _format_command_failure(restart, ["systemctl", "restart", "mosquitto"])
+    return False, f"重启 mosquitto 失败：{detail}"
+  return True, ""
+
+
+def _format_command_failure(result, command):
+  """Compose a short diagnostic string for a failed subprocess result."""
+  stderr = (getattr(result, "stderr", b"") or b"").decode("utf-8", errors="replace").strip()
+  stdout = (getattr(result, "stdout", b"") or b"").decode("utf-8", errors="replace").strip()
+  parts = [f"命令: {' '.join(command)}", f"退出码: {getattr(result, 'returncode', '?')}"]
+  if stderr:
+    parts.append(f"stderr: {stderr}")
+  elif stdout:
+    parts.append(f"stdout: {stdout}")
+  return "；".join(parts)
 
 
 def command_failed(result):
@@ -1017,15 +1035,23 @@ def register_node_from_agent(db, config, form):
   if existing_node_id:
     db.delete_node(existing_node_id)
   node = db.register_node(form.get("name", "vps"))
-  if not refresh_mqtt_auth(db, config):
-    db.delete_node(node["node_id"])
-    raise RuntimeError("MQTT 账号刷新失败，请检查 mosquitto_passwd、ACL 路径和权限。")
-  ok, detail = verify_node_mqtt_auth(config, node)
+  ok, refresh_detail = refresh_mqtt_auth(db, config)
   if not ok:
     db.delete_node(node["node_id"])
-    refresh_mqtt_auth(db, config)
-    suffix = f"最近错误：{detail}" if detail else "无详细错误。"
-    raise RuntimeError(f"MQTT 节点账号验证失败，请检查 Mosquitto 是否已监听并加载最新 ACL。{suffix}")
+    suffix = f" 原因：{refresh_detail}" if refresh_detail else ""
+    raise RuntimeError(
+      f"MQTT 账号刷新失败，请检查 mosquitto_passwd、ACL 路径和权限。{suffix}"
+    )
+  ok, detail = verify_node_mqtt_auth(config, node)
+  verify_suffix = f"最近错误：{detail}" if detail else "无详细错误。"
+  if not ok:
+    db.delete_node(node["node_id"])
+    refreshed, refresh_detail = refresh_mqtt_auth(db, config)
+    if not refreshed and refresh_detail:
+      verify_suffix = f"{verify_suffix} 清除账号时刷新失败：{refresh_detail}"
+    raise RuntimeError(
+      f"MQTT 节点账号验证失败，请检查 Mosquitto 是否已监听并加载最新 ACL。{verify_suffix}"
+    )
   return node
 
 
@@ -1044,7 +1070,9 @@ def handle_node_action(db, config, node_id, action):
     except ValueError:
       pass
     db.delete_node(node_id)
-    refresh_mqtt_auth(db, config)
+    refreshed, refresh_detail = refresh_mqtt_auth(db, config)
+    if not refreshed:
+      print(f"删除节点后刷新 MQTT 账号失败：{refresh_detail}", file=__import__("sys").stderr)
     db.audit("web", "node_delete", node["name"])
     return f"[{node['name']}] 已发送卸载指令并已删除记录。"
   if action == "refresh":

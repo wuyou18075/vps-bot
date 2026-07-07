@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.26}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.27}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -415,7 +415,7 @@ write_mosquitto_files() {
   write_config_value "MQTT_MASTER_USER" "vps_master"
   write_config_value "MQTT_MASTER_PASSWORD" "${master_password}"
 
-  mkdir -p "$(dirname "${MOSQUITTO_CONF}")" "$(dirname "${MOSQUITTO_ACL}")" "$(dirname "${MOSQUITTO_PASSWD}")"
+  mkdir -p "$(dirname "${MOSQUITTO_CONF}")" "$(dirname "${MOSQUITTO_ACL}")" "$(dirname "${MOSQUITTO_PASSWD}")" "${STATE_DIR}/mosquitto/"
   cat > "${MOSQUITTO_CONF}" <<EOF
 listener ${mqtt_port} 0.0.0.0
 allow_anonymous false

@@ -563,7 +563,7 @@ class MqttSecurityTest(unittest.TestCase):
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
       old = db.register_node("old")
 
-      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=True):
+      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=(True, "")):
         with mock.patch("mqtt_master.verify_node_mqtt_auth", return_value=(True, "")):
           new = mqtt_master.register_node_from_agent(db, {}, {
             "name": "new",
@@ -579,7 +579,7 @@ class MqttSecurityTest(unittest.TestCase):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
 
-      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=False):
+      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=(False, "boom")):
         with self.assertRaises(RuntimeError):
           mqtt_master.register_node_from_agent(db, {}, {"name": "broken"})
       nodes = db.list_nodes()
@@ -590,7 +590,7 @@ class MqttSecurityTest(unittest.TestCase):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
 
-      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=True):
+      with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=(True, "")):
         with mock.patch("mqtt_master.verify_node_mqtt_auth", return_value=(False, "not authorised")) as verify:
           with self.assertRaisesRegex(RuntimeError, "not authorised"):
             mqtt_master.register_node_from_agent(db, {}, {"name": "broken"})
@@ -670,12 +670,13 @@ class MqttSecurityTest(unittest.TestCase):
 
       with mock.patch("mqtt_master.subprocess.run") as run:
         run.return_value.returncode = 1
-        ok = mqtt_master.refresh_mqtt_auth(db, {
+        ok, detail = mqtt_master.refresh_mqtt_auth(db, {
           "MOSQUITTO_ACL": os.path.join(temp_dir, "acl"),
           "MOSQUITTO_PASSWD": os.path.join(temp_dir, "passwd"),
         })
 
     self.assertFalse(ok)
+    self.assertIn("mosquitto_passwd", detail)
 
   def test_refresh_mqtt_auth_restarts_mosquitto_after_credentials_change(self):
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -700,12 +701,13 @@ class MqttSecurityTest(unittest.TestCase):
       with mock.patch.object(mqtt_master, "DEFAULT_MOSQUITTO_ACL", acl):
         with mock.patch.object(mqtt_master, "DEFAULT_MOSQUITTO_PASSWD", passwd):
           with mock.patch("mqtt_master.subprocess.run"):
-            refreshed = mqtt_master.refresh_mqtt_auth(db, {})
+            refreshed, detail = mqtt_master.refresh_mqtt_auth(db, {})
 
       with open(acl, "r", encoding="utf-8") as file:
         acl_text = file.read()
 
     self.assertTrue(refreshed)
+    self.assertEqual("", detail)
     self.assertIn(f"topic read vps-bot/commands/{node['node_id']}", acl_text)
 
   def test_runtime_config_merges_persisted_settings(self):
@@ -773,7 +775,7 @@ class MqttSecurityTest(unittest.TestCase):
       node = db.register_node("test7")
 
       with mock.patch("mqtt_master.publish_mqtt") as publish:
-        with mock.patch("mqtt_master.refresh_mqtt_auth"):
+        with mock.patch("mqtt_master.refresh_mqtt_auth", return_value=(True, "")):
           message = mqtt_master.handle_node_action(db, {}, node["node_id"], "delete")
 
       self.assertIn("卸载", message)
