@@ -205,6 +205,100 @@ class MqttSecurityTest(unittest.TestCase):
 
     self.assertIn("; Secure", cookie)
 
+  def test_totp_page_contains_local_qr_image(self):
+    handler = object.__new__(mqtt_master.MasterRequestHandler)
+
+    with mock.patch("mqtt_master.generate_totp_secret", return_value="ABCDEF234567"):
+      with mock.patch("mqtt_master.qr_svg_data_uri", return_value="data:image/svg+xml;base64,abc"):
+        html = handler.render_totp("cj")
+
+    self.assertIn("data:image/svg+xml;base64,abc", html)
+    self.assertIn("otpauth://totp/vps-mqtt:cj", html)
+    self.assertNotIn("chart.googleapis.com", html)
+    self.assertNotIn("api.qrserver.com", html)
+
+  def test_qr_svg_data_uri_uses_local_qrencode(self):
+    svg = b"<svg></svg>"
+    with mock.patch("mqtt_master.subprocess.run") as run:
+      run.return_value = type("Result", (), {
+        "returncode": 0,
+        "stdout": svg,
+      })()
+
+      uri = mqtt_master.qr_svg_data_uri("otpauth://example")
+
+    self.assertTrue(uri.startswith("data:image/svg+xml;base64,"))
+    self.assertIn("qrencode", run.call_args.args[0][0])
+
+  def test_telegram_save_requires_current_password(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.create_admin("admin", "pw")
+
+      ok, message = mqtt_master.save_telegram_settings(
+        db,
+        "admin",
+        {
+          "token": "123:abc",
+          "chat_id": "456",
+          "current_password": "bad",
+        },
+      )
+
+    self.assertFalse(ok)
+    self.assertIn("登录密码错误", message)
+
+  def test_telegram_save_sends_test_message_and_persists(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.create_admin("admin", "pw")
+
+      with mock.patch("mqtt_master.send_telegram_test", return_value=True) as send:
+        ok, message = mqtt_master.save_telegram_settings(
+          db,
+          "admin",
+          {
+            "token": "123:abc",
+            "chat_id": "456",
+            "current_password": "pw",
+          },
+        )
+
+      self.assertTrue(ok)
+      self.assertIn("Telegram 绑定成功", message)
+      self.assertEqual("123:abc", db.get_setting("telegram_token"))
+      self.assertEqual("456", db.get_setting("telegram_chat_id"))
+      send.assert_called_once_with("123:abc", "456")
+
+  def test_create_registration_command_for_web_uses_db_token(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      command = mqtt_master.create_registration_command_for_web(
+        db,
+        {
+          "PUBLIC_URL": "http://1.2.3.4:8088",
+          "RAW_BASE_URL": "https://raw.example.com",
+        },
+        "hk",
+      )
+
+    self.assertIn("mqtt.sh", command)
+    self.assertIn("--master-url 'http://1.2.3.4:8088'", command)
+    self.assertIn("--node-name 'hk'", command)
+
+  def test_node_actions_can_mark_offline_and_delete(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+
+      message = mqtt_master.handle_node_action(db, {}, node["node_id"], "offline")
+      self.assertIn("已标记离线", message)
+      self.assertEqual("offline", db.list_nodes()[0]["status"])
+
+      message = mqtt_master.handle_node_action(db, {}, node["node_id"], "delete")
+      self.assertIn("已删除", message)
+      self.assertEqual([], db.list_nodes())
+
   def test_login_trims_username_and_sets_session_cookie(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))

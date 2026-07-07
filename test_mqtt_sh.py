@@ -33,6 +33,7 @@ class MqttShellTest(unittest.TestCase):
     self.assertIn("mosquitto-clients", output)
     self.assertIn("python3", output)
     self.assertIn("nginx", output)
+    self.assertIn("qrencode", output)
 
   def test_render_main_panel_shows_status_lines(self):
     script = textwrap.dedent("""

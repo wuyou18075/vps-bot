@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import hmac
 import html
@@ -81,6 +82,19 @@ def verify_totp(secret, code, now=None, window=1):
     if hmac.compare_digest(expected, code):
       return True
   return False
+
+
+def qr_svg_data_uri(value):
+  """Render a QR code as a local SVG data URI using qrencode."""
+  result = subprocess.run(
+    ["qrencode", "-t", "SVG", "-o", "-", value],
+    capture_output=True,
+    check=False,
+  )
+  if result.returncode != 0:
+    return ""
+  encoded = base64.b64encode(result.stdout).decode("ascii")
+  return f"data:image/svg+xml;base64,{encoded}"
 
 
 def hash_password(password, salt=None, iterations=260000):
@@ -231,11 +245,19 @@ class MasterDatabase:
       os.makedirs(directory, mode=0o700, exist_ok=True)
     self.initialize()
 
+  @contextmanager
   def connect(self):
     """Open a database connection."""
     connection = sqlite3.connect(self.path)
     connection.row_factory = sqlite3.Row
-    return connection
+    try:
+      yield connection
+      connection.commit()
+    except Exception:
+      connection.rollback()
+      raise
+    finally:
+      connection.close()
 
   def initialize(self):
     """Create tables if missing."""
@@ -411,6 +433,12 @@ class MasterDatabase:
       )
       db.commit()
 
+  def delete_node(self, node_id):
+    """Delete a registered node."""
+    with self.connect() as db:
+      db.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+      db.commit()
+
   def set_setting(self, key, value):
     """Persist a setting."""
     with self.connect() as db:
@@ -476,6 +504,27 @@ def send_telegram(config, text):
     data=data,
   )
   urllib.request.urlopen(request, timeout=15).read()
+
+
+def send_telegram_test(token, chat_id):
+  """Send a Telegram connectivity test message."""
+  if not token or not chat_id:
+    return False
+  data = urllib.parse.urlencode({
+    "chat_id": chat_id,
+    "text": "VPS MQTT 面板 Telegram 绑定测试成功",
+    "disable_web_page_preview": "true",
+  }).encode("utf-8")
+  request = urllib.request.Request(
+    f"https://api.telegram.org/bot{token}/sendMessage",
+    data=data,
+  )
+  try:
+    with urllib.request.urlopen(request, timeout=15) as response:
+      payload = json.loads(response.read().decode("utf-8"))
+  except Exception:
+    return False
+  return bool(payload.get("ok"))
 
 
 def telegram_api(config, method, data=None, timeout=30):
@@ -587,6 +636,60 @@ def dispatch_command(db, config, node_id, command_text):
   }, node["command_secret"])
   publish_mqtt(config, command_topic(config, node_id), json.dumps(payload, ensure_ascii=False))
   db.audit("web", "dispatch_command", f"{node['name']} {command_text}")
+
+
+def save_telegram_settings(db, username, form):
+  """Persist Telegram settings after verifying the current login password."""
+  user = db.get_user(username)
+  if not user or not verify_password(form.get("current_password", ""), user["password_hash"]):
+    return False, "登录密码错误，未保存 Telegram 配置。"
+  token = form.get("token", "").strip()
+  chat_id = form.get("chat_id", "").strip()
+  if not send_telegram_test(token, chat_id):
+    return False, "Telegram 连通性验证失败，请检查 Bot Token 和 Chat ID。"
+  db.set_setting("telegram_token", token)
+  db.set_setting("telegram_chat_id", chat_id)
+  db.audit(username, "save_telegram", "updated and tested")
+  return True, "Telegram 绑定成功，测试消息已发送。"
+
+
+def create_registration_command_for_web(db, config, name=""):
+  """Create a copyable registration command from current web settings."""
+  token = db.create_registration_token()
+  public_url = (config.get("PUBLIC_URL") or db.get_setting("PUBLIC_URL", "")).rstrip("/")
+  raw_base = (
+    config.get("RAW_BASE_URL")
+    or db.get_setting("RAW_BASE_URL", "")
+    or "https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main"
+  ).rstrip("/")
+  node_arg = f" --node-name {sh_quote(name)}" if name else ""
+  return (
+    "bash <(curl -fsSL "
+    f"{sh_quote(raw_base + '/mqtt.sh')}) register-agent "
+    f"--master-url {sh_quote(public_url)} --token {sh_quote(token)}{node_arg}"
+  )
+
+
+def handle_node_action(db, config, node_id, action):
+  """Handle a node operation from the web panel."""
+  node = next((item for item in db.list_nodes() if item["node_id"] == node_id), None)
+  if not node:
+    return "节点不存在。"
+  if action == "offline":
+    db.update_node_status(node_id, "offline", node.get("public_ip") or "")
+    db.audit("web", "node_offline", node["name"])
+    return f"[{node['name']}] 已标记离线。"
+  if action == "delete":
+    db.delete_node(node_id)
+    db.audit("web", "node_delete", node["name"])
+    return f"[{node['name']}] 已删除。"
+  if action == "refresh":
+    dispatch_command(db, config, node_id, "/status")
+    return f"[{node['name']}] 已发送更新请求。"
+  if action == "online":
+    dispatch_command(db, config, node_id, "/status")
+    return f"[{node['name']}] 已发送上线检查。"
+  return "不支持的操作。"
 
 
 def telegram_help_text(db):
@@ -851,6 +954,12 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     if self.path == "/command":
       self.handle_command(user)
       return
+    if self.path == "/registration-command":
+      self.handle_registration_command(user)
+      return
+    if self.path == "/node-action":
+      self.handle_node_action(user)
+      return
     self.send_error(404)
 
   def render_setup(self):
@@ -929,7 +1038,12 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       "<option>/status</option><option>/use</option><option>/speed</option>"
       "<option>/disk</option><option>/top</option><option>/uptime</option>"
       "<option>/services</option>"
-      "</select> <button>执行</button></form></td>"
+      "</select> <button>执行</button></form>"
+      f"<form method='post' action='/node-action'><input type='hidden' name='node_id' value='{html.escape(item['node_id'])}'>"
+      "<button name='action' value='online'>上线检查</button> "
+      "<button name='action' value='refresh'>更新</button> "
+      "<button name='action' value='offline'>下线</button> "
+      "<button name='action' value='delete'>删除</button></form></td>"
       "</tr>"
       for item in nodes
     ])
@@ -946,11 +1060,16 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   <form method="post" action="/telegram">
     <label>Bot Token<br><input name="token" value="{html.escape(self.db.get_setting('telegram_token'))}"></label><br>
     <label>Chat ID<br><input name="chat_id" value="{html.escape(self.db.get_setting('telegram_chat_id'))}"></label><br>
+    <label>当前登录密码<br><input name="current_password" type="password" required></label><br>
     <button>保存</button>
   </form>
 </section>
 <section>
   <h2>已注册 VPS</h2>
+  <form method="post" action="/registration-command">
+    <label>节点备注名<br><input name="name" placeholder="可留空"></label>
+    <button>绑定 VPS</button>
+  </form>
   <table><thead><tr><th>节点</th><th>状态</th><th>公网 IP</th><th>操作</th></tr></thead><tbody>{rows}</tbody></table>
 </section>""")
 
@@ -960,9 +1079,12 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     issuer = urllib.parse.quote(APP_NAME)
     account = urllib.parse.quote(user)
     uri = f"otpauth://totp/{issuer}:{account}?secret={secret}&issuer={issuer}"
+    qr_uri = qr_svg_data_uri(uri)
+    qr_html = f'<img alt="Google Authenticator QR" src="{qr_uri}" style="width:220px;height:220px">' if qr_uri else "<p>未安装 qrencode，暂无法生成二维码。</p>"
     return self.page("双重认证", f"""
 <h1>绑定 Google Authenticator</h1>
 <section>
+  {qr_html}
   <p>在 Google Authenticator 中手动输入密钥：</p>
   <pre>{html.escape(secret)}</pre>
   <p class="muted">{html.escape(uri)}</p>
@@ -987,10 +1109,11 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   def handle_telegram(self, user):
     """Save Telegram settings."""
     form = self.read_form()
-    self.db.set_setting("telegram_token", form.get("token", ""))
-    self.db.set_setting("telegram_chat_id", form.get("chat_id", ""))
-    self.db.audit(user, "save_telegram", "updated")
-    self.redirect("/")
+    ok, message = save_telegram_settings(self.db, user, form)
+    if not ok:
+      self.send_html(self.page("Telegram 绑定失败", f"<p>{html.escape(message)}</p>"), status=400)
+      return
+    self.send_html(self.page("Telegram 绑定成功", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"))
 
   def handle_command(self, user):
     """Dispatch a whitelisted command."""
@@ -1002,6 +1125,24 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       return
     self.db.audit(user, "web_command", form.get("command", ""))
     self.redirect("/")
+
+  def handle_registration_command(self, user):
+    """Render a copyable agent registration command."""
+    form = self.read_form()
+    command = create_registration_command_for_web(self.db, self.config, form.get("name", ""))
+    self.db.audit(user, "create_registration_command", form.get("name", ""))
+    self.send_html(self.page("绑定 VPS", f"""
+<h1>绑定 VPS</h1>
+<p>在要绑定的 VPS 上执行：</p>
+<textarea style="width:100%; min-height:120px">{html.escape(command)}</textarea>
+<p><a href="/">返回面板</a></p>"""))
+
+  def handle_node_action(self, user):
+    """Handle node action buttons."""
+    form = self.read_form()
+    message = handle_node_action(self.db, self.config, form.get("node_id", ""), form.get("action", ""))
+    self.db.audit(user, "node_action", message)
+    self.send_html(self.page("VPS 操作", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"))
 
   def handle_register_api(self):
     """Register an agent using a one-time token."""
