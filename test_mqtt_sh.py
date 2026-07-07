@@ -84,15 +84,23 @@ class MqttShellTest(unittest.TestCase):
       VPS_MQTT_TESTING=1 source ./mqtt.sh
       CONFIG_DIR=/tmp/vps-mqtt-panel-uninstalled
       CONFIG_FILE="${CONFIG_DIR}/config.env"
+      MOSQUITTO_CONF=/tmp/vps-mqtt-panel-uninstalled.conf
       rm -f "${CONFIG_FILE}"
+      rm -f "${MOSQUITTO_CONF}"
       PUBLIC_URL=http://old.example.com
       WEB_PORT=8088
+      systemctl() {
+        if [ "$1" = "is-active" ]; then
+          return 0
+        fi
+      }
       get_web_status() { printf '%s\\n' '未运行'; }
       render_main_panel
     """)
 
     output = self.run_bash(script)
 
+    self.assertIn("MQTT服务: 未配置", output)
     self.assertIn("Web面板: 未运行 (未配置)", output)
     self.assertIn("公网访问: 未配置", output)
     self.assertNotIn("old.example.com", output)
