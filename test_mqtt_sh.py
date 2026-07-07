@@ -5,6 +5,7 @@ import unittest
 
 class MqttShellTest(unittest.TestCase):
   def run_bash(self, script, stdin=""):
+    script = "export VPS_MQTT_FORCE_REMOTE=0\n" + script
     result = subprocess.run(
       ["bash", "-c", script],
       input=stdin,
@@ -123,6 +124,38 @@ class MqttShellTest(unittest.TestCase):
 
     self.assertEqual("8.8.8.8", self.run_bash(script))
 
+  def test_install_project_files_downloads_latest_even_when_local_files_exist(self):
+    script = textwrap.dedent("""
+      suffix="$$"
+      tmp_dir="/tmp/vps-mqtt-local-source-${suffix}"
+      mkdir -p "${tmp_dir}"
+      cd "${tmp_dir}"
+      printf '%s\\n' 'old master' > mqtt_master.py
+      printf '%s\\n' 'old agent' > mqtt_agent.py
+      export VPS_MQTT_FORCE_REMOTE=1
+      VPS_MQTT_TESTING=1 source /mnt/f/github-project/vps-bot/mqtt.sh
+      INSTALL_DIR="/tmp/vps-mqtt-force-update-install-${suffix}"
+      STATE_DIR="/tmp/vps-mqtt-force-update-state-${suffix}"
+      CONFIG_DIR="/tmp/vps-mqtt-force-update-config-${suffix}"
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      RAW_BASE_URL="https://raw.example.com/main"
+      download_file() {
+        printf '%s\\n' "$1" >> "/tmp/vps-mqtt-force-update-downloads-${suffix}"
+        printf '%s\\n' "downloaded from $1" > "$2"
+      }
+      install_project_files
+      cat "${INSTALL_DIR}/mqtt_master.py"
+      cat "${INSTALL_DIR}/mqtt_agent.py"
+      cat "/tmp/vps-mqtt-force-update-downloads-${suffix}"
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("downloaded from https://raw.example.com/main/mqtt_master.py?t=", output)
+    self.assertIn("downloaded from https://raw.example.com/main/mqtt_agent.py?t=", output)
+    self.assertNotIn("old master", output)
+    self.assertNotIn("old agent", output)
+
   def test_setup_master_writes_secure_config_and_services(self):
     script = textwrap.dedent("""
       VPS_MQTT_TESTING=1 source ./mqtt.sh
@@ -175,11 +208,11 @@ EOF
     write_body = script.split("write_mosquitto_files() {", 1)[1].split("write_master_service()", 1)[0]
 
     self.assertIn("chmod 640", write_body)
-    self.assertIn("chown root:mosquitto", write_body)
+    self.assertIn("chown root:root", write_body)
     self.assertIn("mosquitto_passwd -b -c", write_body)
     self.assertIn("set_mosquitto_permissions", write_body.split("mosquitto_passwd -b -c", 1)[1])
 
-  def test_mosquitto_persistence_uses_broker_accessible_directory(self):
+  def test_mosquitto_conf_avoids_duplicate_persistence_settings(self):
     script = textwrap.dedent("""
       VPS_MQTT_TESTING=1 source ./mqtt.sh
       CONFIG_DIR=/tmp/vps-mqtt-persist-config
@@ -198,11 +231,9 @@ EOF
 
     output = self.run_bash(script)
 
-    with open("mqtt.sh", "r", encoding="utf-8") as file:
-      self.assertIn('MOSQUITTO_PERSIST_DIR="${MOSQUITTO_PERSIST_DIR:-/var/lib/mosquitto/${PANEL_NAME}}"', file.read())
-    self.assertIn("persistence_location /tmp/vps-mqtt-broker-persist/", output)
     self.assertIn('MOSQUITTO_PERSIST_DIR="/tmp/vps-mqtt-broker-persist"', output)
-    self.assertNotIn("persistence_location /tmp/vps-mqtt-private-state/mosquitto/", output)
+    self.assertNotIn("persistence true", output)
+    self.assertNotIn("persistence_location", output)
 
   def test_repair_master_rewrites_mqtt_and_services(self):
     script = textwrap.dedent("""
@@ -225,6 +256,7 @@ EOF
       check_web_health() { printf '%s\\n' web-health; }
       save_runtime_settings() { printf '%s\\n' save-settings; }
       mosquitto_passwd() { :; }
+      download_file() { printf '%s\\n' "downloaded $1" > "$2"; }
       cp() { command cp "$@"; }
       repair_master
       cat "${MOSQUITTO_CONF}"
@@ -237,10 +269,45 @@ EOF
     output = self.run_bash(script)
 
     self.assertIn("password_file /tmp/vps-mqtt-repair-", output)
-    self.assertIn("persistence_location /tmp/vps-mqtt-repair-persist-", output)
+    self.assertNotIn("persistence_location", output)
     self.assertIn("ExecStart=/usr/bin/python3 /tmp/vps-mqtt-repair-install-", output)
     self.assertIn("restart mosquitto", output)
     self.assertIn("restart vps-mqtt-master.service", output)
+
+  def test_repair_master_reports_mosquitto_config_diagnostics(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      suffix="$$"
+      CONFIG_DIR="/tmp/vps-mqtt-diagnose-config-${suffix}"
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      INSTALL_DIR="/tmp/vps-mqtt-diagnose-install-${suffix}"
+      STATE_DIR="/tmp/vps-mqtt-diagnose-state-${suffix}"
+      SERVICE_FILE="/tmp/vps-mqtt-diagnose-${suffix}.service"
+      NGINX_FILE="/tmp/vps-mqtt-diagnose-nginx-${suffix}.conf"
+      NGINX_LINK="/tmp/vps-mqtt-diagnose-nginx-${suffix}.link"
+      MOSQUITTO_CONF="/tmp/vps-mqtt-diagnose-mosquitto-${suffix}.conf"
+      MOSQUITTO_ACL="/tmp/vps-mqtt-diagnose-${suffix}.acl"
+      MOSQUITTO_PASSWD="/tmp/vps-mqtt-diagnose-${suffix}.passwd"
+      MOSQUITTO_PERSIST_DIR="/tmp/vps-mqtt-diagnose-persist-${suffix}"
+      install_dependencies() { :; }
+      check_mqtt_health() { :; }
+      check_web_health() { :; }
+      save_runtime_settings() { :; }
+      mosquitto_passwd() { :; }
+      download_file() { printf '%s\\n' "downloaded $1" > "$2"; }
+      cp() { command cp "$@"; }
+      systemctl() { :; }
+      mosquitto() {
+        printf '%s\\n' 'Error: Unable to write persistence database.' >&2
+        return 1
+      }
+      repair_master
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("Mosquitto 配置诊断失败", output)
+    self.assertIn("Unable to write persistence database", output)
 
   def test_setup_master_defaults_public_url_to_ip_port(self):
     script = textwrap.dedent("""

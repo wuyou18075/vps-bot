@@ -2,8 +2,9 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.28}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.30}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
+VPS_MQTT_FORCE_REMOTE="${VPS_MQTT_FORCE_REMOTE:-1}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.env}"
@@ -149,6 +150,11 @@ download_file() {
   exit 1
 }
 
+remote_file_url() {
+  local file_name="$1"
+  printf "%s/%s?t=%s\n" "${RAW_BASE_URL}" "${file_name}" "${RANDOM}${RANDOM}"
+}
+
 install_project_files() {
   normalize_paths
   mkdir -p "${INSTALL_DIR}" "${STATE_DIR}" "${CONFIG_DIR}"
@@ -159,16 +165,16 @@ install_project_files() {
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   fi
 
-  if [ -n "${script_dir}" ] && [ -f "${script_dir}/mqtt_master.py" ]; then
+  if [ "${VPS_MQTT_FORCE_REMOTE}" != "1" ] && [ -n "${script_dir}" ] && [ -f "${script_dir}/mqtt_master.py" ]; then
     cp "${script_dir}/mqtt_master.py" "${MASTER_FILE}"
   else
-    download_file "${RAW_BASE_URL}/mqtt_master.py" "${MASTER_FILE}"
+    download_file "$(remote_file_url mqtt_master.py)" "${MASTER_FILE}"
   fi
 
-  if [ -n "${script_dir}" ] && [ -f "${script_dir}/mqtt_agent.py" ]; then
+  if [ "${VPS_MQTT_FORCE_REMOTE}" != "1" ] && [ -n "${script_dir}" ] && [ -f "${script_dir}/mqtt_agent.py" ]; then
     cp "${script_dir}/mqtt_agent.py" "${AGENT_FILE}"
   else
-    download_file "${RAW_BASE_URL}/mqtt_agent.py" "${AGENT_FILE}"
+    download_file "$(remote_file_url mqtt_agent.py)" "${AGENT_FILE}"
   fi
 
   chmod 755 "${MASTER_FILE}" "${AGENT_FILE}" 2>/dev/null || true
@@ -329,6 +335,37 @@ check_mqtt_health() {
   return 0
 }
 
+diagnose_mosquitto_config() {
+  local output_file
+  output_file="$(mktemp)"
+
+  if ! command -v mosquitto >/dev/null 2>&1; then
+    yellow "Mosquitto 配置诊断跳过：未找到 mosquitto 命令。"
+    rm -f "${output_file}"
+    return 0
+  fi
+
+  if is_testing; then
+    if mosquitto -c "${MOSQUITTO_CONF}" -v >"${output_file}" 2>&1; then
+      rm -f "${output_file}"
+      return 0
+    fi
+  else
+    if timeout 8 mosquitto -c "${MOSQUITTO_CONF}" -v >"${output_file}" 2>&1; then
+      rm -f "${output_file}"
+      return 0
+    fi
+  fi
+
+  yellow "Mosquitto 配置诊断失败：${MOSQUITTO_CONF}"
+  if [ -s "${output_file}" ]; then
+    tail -n 20 "${output_file}"
+  fi
+  yellow "常见原因：端口 ${MQTT_PORT:-1883} 被占用、ACL/passwd 路径不可读、persistence_location 不可写。"
+  rm -f "${output_file}"
+  return 0
+}
+
 create_web_admin() {
   local username="$1"
   local password="$2"
@@ -439,8 +476,6 @@ listener ${mqtt_port} 0.0.0.0
 allow_anonymous false
 password_file ${MOSQUITTO_PASSWD}
 acl_file ${MOSQUITTO_ACL}
-persistence true
-persistence_location ${persist_dir}/
 EOF
 
   cat > "${MOSQUITTO_ACL}" <<EOF
@@ -459,7 +494,7 @@ set_mosquitto_permissions() {
 
   chmod 640 "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}"
   if id mosquitto >/dev/null 2>&1; then
-    chown root:mosquitto "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}" 2>/dev/null || true
+    chown root:root "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}" 2>/dev/null || true
     chown mosquitto:mosquitto "${persist_dir}" 2>/dev/null || true
     chmod 750 "${persist_dir}" 2>/dev/null || true
   else
@@ -569,6 +604,7 @@ setup_master() {
 
   systemctl daemon-reload
   systemctl enable mosquitto >/dev/null 2>&1 || true
+  diagnose_mosquitto_config
   systemctl restart mosquitto >/dev/null 2>&1 || true
   systemctl enable --now "${PANEL_NAME}-master.service" >/dev/null 2>&1 || true
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
@@ -626,6 +662,7 @@ repair_master() {
 
   systemctl daemon-reload
   systemctl enable mosquitto >/dev/null 2>&1 || true
+  diagnose_mosquitto_config
   systemctl restart mosquitto
   systemctl restart "${PANEL_NAME}-master.service"
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
