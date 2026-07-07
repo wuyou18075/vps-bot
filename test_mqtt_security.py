@@ -112,6 +112,17 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertNotEqual("pw", user["password_hash"])
     self.assertTrue(mqtt_master.verify_password("pw", user["password_hash"]))
 
+  def test_create_admin_user_updates_existing_password(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db_path = os.path.join(temp_dir, "master.db")
+      mqtt_master.create_admin_user(db_path, "admin", "old")
+      mqtt_master.create_admin_user(db_path, "admin", "new")
+      db = mqtt_master.MasterDatabase(db_path)
+      user = db.get_user("admin")
+
+    self.assertFalse(mqtt_master.verify_password("old", user["password_hash"]))
+    self.assertTrue(mqtt_master.verify_password("new", user["password_hash"]))
+
   def test_create_admin_user_rejects_one_character_password(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db_path = os.path.join(temp_dir, "master.db")
@@ -219,6 +230,29 @@ class MqttSecurityTest(unittest.TestCase):
     cookie = next(value for key, value in sent if key == "Set-Cookie")
     self.assertIn("session=", cookie)
     self.assertNotIn("; Secure", cookie)
+
+  def test_login_without_totp_enabled_ignores_empty_totp(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.create_admin("admin", "pw")
+      handler = object.__new__(mqtt_master.MasterRequestHandler)
+      handler.headers = {"X-Forwarded-Proto": "http"}
+      handler.client_address = ("127.0.0.1", 12345)
+      handler.rate_limiter = mqtt_master.LoginRateLimiter()
+      handler.read_form = lambda: {
+        "username": "admin",
+        "password": "pw",
+        "totp": "",
+      }
+      handler.server = type("Server", (), {"db": db})()
+      sent = []
+      handler.send_response = lambda status: sent.append(("status", status))
+      handler.send_header = lambda key, value: sent.append((key, value))
+      handler.end_headers = lambda: sent.append(("end", ""))
+
+      handler.handle_login()
+
+    self.assertIn(("status", 303), sent)
 
 
 if __name__ == "__main__":

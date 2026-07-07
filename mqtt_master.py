@@ -887,7 +887,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
 <form method="post" action="/login">
   <label>用户名<br><input name="username" required></label><br>
   <label>密码<br><input name="password" type="password" required></label><br>
-  <label>双重验证码<br><input name="totp" inputmode="numeric" autocomplete="one-time-code"></label><br>
+  <label>双重验证码（未绑定可留空）<br><input name="totp" inputmode="numeric" autocomplete="one-time-code"></label><br>
   <button type="submit">登录</button>
 </form>""")
 
