@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.22}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.23}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -279,6 +279,40 @@ check_web_health() {
   return 0
 }
 
+check_mqtt_health() {
+  local host="${1:-127.0.0.1}"
+  local port="${MQTT_PORT:-1883}"
+  local topic="${MQTT_TOPIC_PREFIX:-vps-bot}/health/installer"
+  local attempt
+  local error_file
+  error_file="$(mktemp)"
+
+  for attempt in 1 2 3 4 5; do
+    if mosquitto_pub \
+      -h "${host}" \
+      -p "${port}" \
+      -u "${MQTT_MASTER_USER:-vps_master}" \
+      -P "${MQTT_MASTER_PASSWORD:-}" \
+      -t "${topic}" \
+      -m "ok" \
+      2>"${error_file}"; then
+      green "MQTT 本机健康检查通过：${host}:${port}"
+      rm -f "${error_file}"
+      return 0
+    fi
+    sleep 1
+  done
+
+  yellow "MQTT 本机健康检查失败：${host}:${port}"
+  if [ -s "${error_file}" ]; then
+    yellow "最近错误：$(tail -n 1 "${error_file}")"
+  fi
+  yellow "请在主控 VPS 上查看：systemctl status mosquitto --no-pager"
+  yellow "请在主控 VPS 上查看：ss -lntp | grep ':${port}'"
+  rm -f "${error_file}"
+  return 0
+}
+
 create_web_admin() {
   local username="$1"
   local password="$2"
@@ -502,9 +536,11 @@ setup_master() {
   write_nginx_config
 
   systemctl daemon-reload
-  systemctl enable --now mosquitto >/dev/null 2>&1 || true
+  systemctl enable mosquitto >/dev/null 2>&1 || true
+  systemctl restart mosquitto >/dev/null 2>&1 || true
   systemctl enable --now "${PANEL_NAME}-master.service" >/dev/null 2>&1 || true
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+  check_mqtt_health "127.0.0.1"
   check_web_health
 
   green "MQTT 主控服务已安装。Web 首次访问 ${public_url}，使用账号 ${admin_username} 登录后绑定 Google Authenticator。"
@@ -623,6 +659,7 @@ register_agent() {
   normalize_paths
   require_root
   green "VPS MQTT 脚本版本: ${SCRIPT_VERSION}"
+  systemctl stop "${PANEL_NAME}-agent.service" >/dev/null 2>&1 || true
   install_dependencies
   install_project_files
 

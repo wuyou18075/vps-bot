@@ -131,6 +131,23 @@ class MqttSecurityTest(unittest.TestCase):
       with self.assertRaises(ValueError):
         mqtt_master.create_admin_user(db_path, "admin", "p")
 
+  def test_mqtt_script_restarts_and_checks_mosquitto_after_master_setup(self):
+    with open("mqtt.sh", "r", encoding="utf-8") as file:
+      script = file.read()
+
+    setup_body = script.split("setup_master() {", 1)[1].split("deploy_web()", 1)[0]
+
+    self.assertIn("systemctl restart mosquitto", setup_body)
+    self.assertIn("check_mqtt_health", setup_body)
+
+  def test_mqtt_script_stops_old_agent_before_reinstalling(self):
+    with open("mqtt.sh", "r", encoding="utf-8") as file:
+      script = file.read()
+
+    register_body = script.split("register_agent() {", 1)[1].split("handle_choice()", 1)[0]
+
+    self.assertLess(register_body.index("systemctl stop"), register_body.index("install_project_files"))
+
   def test_save_runtime_settings_to_database(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db_path = os.path.join(temp_dir, "master.db")
