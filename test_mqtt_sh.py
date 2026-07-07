@@ -144,8 +144,8 @@ https://panel.example.com
 1883
 8088
 admin
-secret-password-123
-secret-password-123
+pw
+pw
 EOF
       cat "${CONFIG_FILE}"
       printf '%s\\n' '---SERVICE---'
@@ -190,8 +190,8 @@ EOF
 1883
 9090
 admin
-secret-password-123
-secret-password-123
+pw
+pw
 EOF
       cat "${CONFIG_FILE}"
     """)
@@ -214,14 +214,78 @@ EOF
 1883
 8088
 admin
-secret-password-123
-different-password-123
+pw
+p2
 EOF
     """)
 
     output = self.run_bash(script)
 
     self.assertIn("两次输入的密码不一致", output)
+
+  def test_setup_master_rejects_one_character_admin_password(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      CONFIG_DIR=/tmp/vps-mqtt-test-short-password
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      INSTALL_DIR=/tmp/vps-mqtt-test-short-password-install
+      STATE_DIR=/tmp/vps-mqtt-test-short-password-state
+      install_dependencies() { :; }
+      setup_master <<'EOF'
+
+1883
+8088
+admin
+p
+p
+EOF
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("Web 管理员密码至少 2 位", output)
+
+  def test_setup_master_persists_runtime_settings_to_sqlite(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      CONFIG_DIR=/tmp/vps-mqtt-test-db-config
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      INSTALL_DIR=/tmp/vps-mqtt-test-db-install
+      STATE_DIR=/tmp/vps-mqtt-test-db-state
+      SERVICE_FILE=/tmp/vps-mqtt-test-db.service
+      NGINX_FILE=/tmp/vps-mqtt-test-db-nginx.conf
+      MOSQUITTO_CONF=/tmp/vps-mqtt-test-db-mosquitto.conf
+      MOSQUITTO_ACL=/tmp/vps-mqtt-test-db-acl
+      MOSQUITTO_PASSWD=/tmp/vps-mqtt-test-db-passwd
+      get_primary_ip() { printf '%s\\n' '5.6.7.8'; }
+      install_dependencies() { :; }
+      systemctl() { :; }
+      check_web_health() { :; }
+      create_web_admin() { :; }
+      mosquitto_passwd() { :; }
+      cp() { command cp "$@"; }
+      setup_master <<'EOF'
+
+1883
+9090
+admin
+pw
+pw
+EOF
+      python3 - <<PY
+import sqlite3
+db = sqlite3.connect("/tmp/vps-mqtt-test-db-state/master.db")
+for key in ["PUBLIC_URL", "MQTT_PORT", "WEB_HOST", "WEB_PORT"]:
+  print(f"{key}=" + db.execute("select value from settings where key=?", (key,)).fetchone()[0])
+PY
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("PUBLIC_URL=http://5.6.7.8:9090", output)
+    self.assertIn("MQTT_PORT=1883", output)
+    self.assertIn("WEB_HOST=0.0.0.0", output)
+    self.assertIn("WEB_PORT=9090", output)
 
   def test_check_web_health_reports_failure(self):
     script = textwrap.dedent("""

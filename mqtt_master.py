@@ -849,7 +849,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
 <h1>初始化管理员</h1>
 <form method="post" action="/setup">
   <label>用户名<br><input name="username" value="admin" required></label><br>
-  <label>密码<br><input name="password" type="password" required minlength="12"></label><br>
+  <label>密码<br><input name="password" type="password" required minlength="2"></label><br>
   <button type="submit">创建管理员</button>
 </form>""")
 
@@ -860,8 +860,8 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       return
     form = self.read_form()
     password = form.get("password", "")
-    if len(password) < 12:
-      self.send_html(self.page("初始化失败", "<p>密码至少 12 位。</p>"), status=400)
+    if len(password) < 2:
+      self.send_html(self.page("初始化失败", "<p>密码至少 2 位。</p>"), status=400)
       return
     username = form.get("username", "admin").strip() or "admin"
     self.db.create_admin(username, password)
@@ -1060,11 +1060,18 @@ def create_registration_command(config_path=DEFAULT_CONFIG, db_path=DEFAULT_DB, 
 
 def create_admin_user(db_path, username, password):
   """Create or reset the web administrator account."""
-  if len(password) < 12:
-    raise ValueError("管理员密码至少 12 位")
+  if len(password) < 2:
+    raise ValueError("管理员密码至少 2 位")
   db = MasterDatabase(db_path)
   db.create_admin(username.strip() or "admin", password)
   db.audit(username.strip() or "admin", "create_admin", "installer")
+
+
+def save_runtime_settings(db_path, settings):
+  """Persist installer/runtime settings into SQLite."""
+  db = MasterDatabase(db_path)
+  for key, value in settings.items():
+    db.set_setting(key, value)
 
 
 def sh_quote(value):
@@ -1083,6 +1090,8 @@ def main():
   token_parser.add_argument("--name", default="")
   admin_parser = sub.add_parser("create-admin")
   admin_parser.add_argument("--username", default="admin")
+  settings_parser = sub.add_parser("set-settings")
+  settings_parser.add_argument("--set", dest="settings", action="append", default=[])
   args = parser.parse_args()
 
   if args.command == "serve":
@@ -1095,6 +1104,16 @@ def main():
     password = os.environ.get("VPS_MQTT_ADMIN_PASSWORD", "")
     create_admin_user(args.db, args.username, password)
     print(f"管理员已创建: {args.username}")
+    return
+  if args.command == "set-settings":
+    settings = {}
+    for item in args.settings:
+      if "=" not in item:
+        continue
+      key, value = item.split("=", 1)
+      settings[key] = value
+    save_runtime_settings(args.db, settings)
+    print("运行参数已写入 SQLite")
     return
   parser.print_help()
 

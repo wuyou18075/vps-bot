@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.5}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.6}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -100,6 +100,23 @@ write_config_value() {
   else
     printf "%s=\"%s\"\n" "${key}" "${value}" >> "${CONFIG_FILE}"
   fi
+}
+
+read_secret() {
+  local prompt="$1"
+  local variable="$2"
+  local value=""
+
+  if [ -t 0 ]; then
+    printf "%s" "${prompt}" >&2
+    stty -echo 2>/dev/null || true
+    IFS= read -r value
+    stty echo 2>/dev/null || true
+    printf "\n" >&2
+  else
+    IFS= read -r value
+  fi
+  printf -v "${variable}" "%s" "${value}"
 }
 
 random_secret() {
@@ -281,6 +298,19 @@ create_web_admin() {
     python3 "${MASTER_FILE}" --config "${CONFIG_FILE}" --db "${STATE_DIR}/master.db" create-admin --username "${username}"
 }
 
+save_runtime_settings() {
+  python3 "${MASTER_FILE}" --config "${CONFIG_FILE}" --db "${STATE_DIR}/master.db" set-settings \
+    --set "PUBLIC_URL=${PUBLIC_URL:-}" \
+    --set "RAW_BASE_URL=${RAW_BASE_URL}" \
+    --set "MQTT_HOST=${MQTT_HOST:-}" \
+    --set "MQTT_PORT=${MQTT_PORT:-}" \
+    --set "MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-vps-bot}" \
+    --set "MQTT_MASTER_USER=${MQTT_MASTER_USER:-vps_master}" \
+    --set "MQTT_MASTER_PASSWORD=${MQTT_MASTER_PASSWORD:-}" \
+    --set "WEB_HOST=${WEB_HOST:-}" \
+    --set "WEB_PORT=${WEB_PORT:-}"
+}
+
 get_registered_node_count() {
   if [ ! -f "${STATE_DIR}/master.db" ]; then
     printf "0\n"
@@ -439,16 +469,14 @@ setup_master() {
   web_port="${web_port:-${WEB_PORT:-8088}}"
   read -r -p "请输入 Web 管理员用户名 [admin]: " admin_username
   admin_username="${admin_username:-admin}"
-  read -r -s -p "请输入 Web 管理员密码（至少 12 位）: " admin_password
-  printf "\n"
-  read -r -s -p "请再次输入 Web 管理员密码: " admin_password_confirm
-  printf "\n"
+  read_secret "请输入 Web 管理员密码（至少 2 位）: " admin_password
+  read_secret "请再次输入 Web 管理员密码: " admin_password_confirm
   if [ "${admin_password}" != "${admin_password_confirm}" ]; then
     red "两次输入的密码不一致。"
     return
   fi
-  if [ "${#admin_password}" -lt 12 ]; then
-    red "Web 管理员密码至少 12 位。"
+  if [ "${#admin_password}" -lt 2 ]; then
+    red "Web 管理员密码至少 2 位。"
     return
   fi
   public_url="${public_url_input:-${PUBLIC_URL:-http://$(get_primary_ip):${web_port}}}"
@@ -471,6 +499,8 @@ setup_master() {
   load_config
   create_web_admin "${admin_username}" "${admin_password}"
   write_mosquitto_files
+  load_config
+  save_runtime_settings
   write_master_service
   write_nginx_config
 

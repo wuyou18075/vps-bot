@@ -104,13 +104,32 @@ class MqttSecurityTest(unittest.TestCase):
   def test_create_admin_user_stores_hashed_password(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db_path = os.path.join(temp_dir, "master.db")
-      mqtt_master.create_admin_user(db_path, "admin", "long-password-123")
+      mqtt_master.create_admin_user(db_path, "admin", "pw")
       db = mqtt_master.MasterDatabase(db_path)
       user = db.get_user("admin")
 
     self.assertIsNotNone(user)
-    self.assertNotEqual("long-password-123", user["password_hash"])
-    self.assertTrue(mqtt_master.verify_password("long-password-123", user["password_hash"]))
+    self.assertNotEqual("pw", user["password_hash"])
+    self.assertTrue(mqtt_master.verify_password("pw", user["password_hash"]))
+
+  def test_create_admin_user_rejects_one_character_password(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db_path = os.path.join(temp_dir, "master.db")
+
+      with self.assertRaises(ValueError):
+        mqtt_master.create_admin_user(db_path, "admin", "p")
+
+  def test_save_runtime_settings_to_database(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db_path = os.path.join(temp_dir, "master.db")
+      mqtt_master.save_runtime_settings(db_path, {
+        "PUBLIC_URL": "http://1.2.3.4:8088",
+        "WEB_PORT": "8088",
+      })
+      db = mqtt_master.MasterDatabase(db_path)
+
+      self.assertEqual("http://1.2.3.4:8088", db.get_setting("PUBLIC_URL"))
+      self.assertEqual("8088", db.get_setting("WEB_PORT"))
 
   def test_telegram_nodes_lists_registered_vps(self):
     with tempfile.TemporaryDirectory() as temp_dir:
