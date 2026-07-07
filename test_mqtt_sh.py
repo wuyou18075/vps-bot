@@ -42,7 +42,10 @@ class MqttShellTest(unittest.TestCase):
       get_online_node_count() { printf '%s\\n' '2'; }
       get_registered_node_count() { printf '%s\\n' '3'; }
       get_totp_status() { printf '%s\\n' '已开启'; }
-      PUBLIC_URL=https://panel.example.com
+      CONFIG_DIR=/tmp/vps-mqtt-panel-domain-test
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      mkdir -p "${CONFIG_DIR}"
+      printf '%s\\n' 'PUBLIC_URL="https://panel.example.com"' > "${CONFIG_FILE}"
       render_main_panel
     """)
 
@@ -58,9 +61,13 @@ class MqttShellTest(unittest.TestCase):
   def test_panel_uses_ip_and_port_when_public_url_is_empty(self):
     script = textwrap.dedent("""
       VPS_MQTT_TESTING=1 source ./mqtt.sh
+      CONFIG_DIR=/tmp/vps-mqtt-panel-ip-test
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      mkdir -p "${CONFIG_DIR}"
+      printf '%s\\n' 'WEB_PORT="8088"' > "${CONFIG_FILE}"
       get_web_status() { printf '%s\\n' '运行'; }
       get_primary_ip() { printf '%s\\n' '1.2.3.4'; }
-      WEB_PORT=8088
+      load_config
       get_web_access_url
       printf '%s\\n' "---"
       render_main_panel
@@ -71,6 +78,24 @@ class MqttShellTest(unittest.TestCase):
     self.assertIn("http://1.2.3.4:8088", output)
     self.assertIn("Web面板: 运行 (http://1.2.3.4:8088)", output)
     self.assertIn("公网访问: http://1.2.3.4:8088", output)
+
+  def test_panel_shows_unconfigured_after_uninstall(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      CONFIG_DIR=/tmp/vps-mqtt-panel-uninstalled
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      rm -f "${CONFIG_FILE}"
+      PUBLIC_URL=http://old.example.com
+      WEB_PORT=8088
+      get_web_status() { printf '%s\\n' '未运行'; }
+      render_main_panel
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("Web面板: 未运行 (未配置)", output)
+    self.assertIn("公网访问: 未配置", output)
+    self.assertNotIn("old.example.com", output)
 
   def test_primary_ip_prefers_public_ip_lookup(self):
     script = textwrap.dedent("""
