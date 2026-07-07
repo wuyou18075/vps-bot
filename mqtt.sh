@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.30}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.31}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 VPS_MQTT_FORCE_REMOTE="${VPS_MQTT_FORCE_REMOTE:-1}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
@@ -492,7 +492,7 @@ EOF
 set_mosquitto_permissions() {
   local persist_dir="${1:-${MOSQUITTO_PERSIST_DIR%/}}"
 
-  chmod 640 "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}"
+  chmod 644 "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}"
   if id mosquitto >/dev/null 2>&1; then
     chown root:root "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}" 2>/dev/null || true
     chown mosquitto:mosquitto "${persist_dir}" 2>/dev/null || true

@@ -207,10 +207,38 @@ EOF
 
     write_body = script.split("write_mosquitto_files() {", 1)[1].split("write_master_service()", 1)[0]
 
-    self.assertIn("chmod 640", write_body)
+    self.assertIn("chmod 644", write_body)
     self.assertIn("chown root:root", write_body)
     self.assertIn("mosquitto_passwd -b -c", write_body)
     self.assertIn("set_mosquitto_permissions", write_body.split("mosquitto_passwd -b -c", 1)[1])
+
+  def test_mosquitto_auth_files_are_world_readable_with_root_group(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      suffix="$$"
+      MOSQUITTO_PASSWD="/tmp/vps-mqtt-readable-${suffix}.passwd"
+      MOSQUITTO_ACL="/tmp/vps-mqtt-readable-${suffix}.acl"
+      persist_dir="/tmp/vps-mqtt-readable-${suffix}-persist"
+      mkdir -p "${persist_dir}"
+      touch "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}"
+      id() {
+        if [ "$1" = "mosquitto" ]; then
+          return 0
+        fi
+        command id "$@"
+      }
+      chown() {
+        printf '%s\\n' "$*" >> "/tmp/vps-mqtt-readable-${suffix}.chown"
+      }
+      set_mosquitto_permissions "${persist_dir}"
+      stat -c '%a %n' "${MOSQUITTO_PASSWD}" "${MOSQUITTO_ACL}"
+      cat "/tmp/vps-mqtt-readable-${suffix}.chown"
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("644 /tmp/vps-mqtt-readable-", output)
+    self.assertIn("root:root /tmp/vps-mqtt-readable-", output)
 
   def test_mosquitto_conf_avoids_duplicate_persistence_settings(self):
     script = textwrap.dedent("""
