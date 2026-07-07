@@ -222,6 +222,23 @@ get_web_status() {
   fi
 }
 
+get_primary_ip() {
+  local ip=""
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [ -z "${ip}" ] && command -v ip >/dev/null 2>&1; then
+    ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')"
+  fi
+  printf "%s\n" "${ip:-127.0.0.1}"
+}
+
+get_web_access_url() {
+  if [ -n "${PUBLIC_URL:-}" ]; then
+    printf "%s\n" "${PUBLIC_URL}"
+  else
+    printf "http://%s:%s\n" "$(get_primary_ip)" "${WEB_PORT:-8088}"
+  fi
+}
+
 get_registered_node_count() {
   if [ ! -f "${STATE_DIR}/master.db" ]; then
     printf "0\n"
@@ -275,8 +292,8 @@ render_main_panel() {
  VPS MQTT 监控面板 - 脚本 ${SCRIPT_VERSION}
 ========================================
 MQTT服务: $(get_mqtt_status)
-Web面板: $(get_web_status)
-公网访问: ${PUBLIC_URL:-未设置}
+Web面板: $(get_web_status) ($(get_web_access_url))
+公网访问: $(get_web_access_url)
 在线VPS: $(get_online_node_count)
 已注册VPS: $(get_registered_node_count)
 双重认证: $(get_totp_status)
@@ -372,15 +389,15 @@ setup_master() {
   local mqtt_port
   local web_port
   read -r -p "请输入 Web 公网地址，例如 https://panel.example.com [${PUBLIC_URL:-}]: " public_url
-  public_url="${public_url:-${PUBLIC_URL:-}}"
   read -r -p "请输入 MQTT 端口 [${MQTT_PORT:-1883}]: " mqtt_port
   mqtt_port="${mqtt_port:-${MQTT_PORT:-1883}}"
   read -r -p "请输入 Web 本地端口 [${WEB_PORT:-8088}]: " web_port
   web_port="${web_port:-${WEB_PORT:-8088}}"
+  public_url="${public_url:-${PUBLIC_URL:-http://$(get_primary_ip):${web_port}}}"
 
   write_config_value "PUBLIC_URL" "${public_url}"
   write_config_value "RAW_BASE_URL" "${RAW_BASE_URL}"
-  write_config_value "MQTT_HOST" "$(hostname -I 2>/dev/null | awk '{print $1}')"
+  write_config_value "MQTT_HOST" "$(get_primary_ip)"
   write_config_value "MQTT_PORT" "${mqtt_port}"
   write_config_value "MQTT_TOPIC_PREFIX" "${MQTT_TOPIC_PREFIX:-vps-bot}"
   write_config_value "WEB_HOST" "127.0.0.1"
@@ -396,7 +413,7 @@ setup_master() {
   systemctl enable --now "${PANEL_NAME}-master.service" >/dev/null 2>&1 || true
   systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
 
-  green "MQTT 主控服务已安装。Web 首次访问 ${public_url:-服务器IP} 后创建管理员，并绑定 Google Authenticator。"
+  green "MQTT 主控服务已安装。Web 首次访问 ${public_url} 后创建管理员，并绑定 Google Authenticator。"
 }
 
 deploy_web() {

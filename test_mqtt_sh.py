@@ -49,11 +49,28 @@ class MqttShellTest(unittest.TestCase):
     output = self.run_bash(script)
 
     self.assertIn("MQTT服务: 运行", output)
-    self.assertIn("Web面板: 运行", output)
+    self.assertIn("Web面板: 运行 (https://panel.example.com)", output)
     self.assertIn("公网访问: https://panel.example.com", output)
     self.assertIn("在线VPS: 2", output)
     self.assertIn("已注册VPS: 3", output)
     self.assertIn("双重认证: 已开启", output)
+
+  def test_panel_uses_ip_and_port_when_public_url_is_empty(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      get_web_status() { printf '%s\\n' '运行'; }
+      get_primary_ip() { printf '%s\\n' '1.2.3.4'; }
+      WEB_PORT=8088
+      get_web_access_url
+      printf '%s\\n' "---"
+      render_main_panel
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn("http://1.2.3.4:8088", output)
+    self.assertIn("Web面板: 运行 (http://1.2.3.4:8088)", output)
+    self.assertIn("公网访问: http://1.2.3.4:8088", output)
 
   def test_setup_master_writes_secure_config_and_services(self):
     script = textwrap.dedent("""
@@ -91,6 +108,35 @@ EOF
     self.assertIn("ExecStart=/usr/bin/python3 /tmp/vps-mqtt-test-install/mqtt_master.py --config /tmp/vps-mqtt-test-config/config.env serve", output)
     self.assertIn("password_file /tmp/vps-mqtt-passwd", output)
     self.assertIn("acl_file /tmp/vps-mqtt-acl", output)
+
+  def test_setup_master_defaults_public_url_to_ip_port(self):
+    script = textwrap.dedent("""
+      VPS_MQTT_TESTING=1 source ./mqtt.sh
+      CONFIG_DIR=/tmp/vps-mqtt-test-config-default-url
+      CONFIG_FILE="${CONFIG_DIR}/config.env"
+      INSTALL_DIR=/tmp/vps-mqtt-test-install-default-url
+      STATE_DIR=/tmp/vps-mqtt-test-state-default-url
+      SERVICE_FILE=/tmp/vps-mqtt-master-default-url.service
+      NGINX_FILE=/tmp/vps-mqtt-nginx-default-url.conf
+      MOSQUITTO_CONF=/tmp/vps-mqtt-mosquitto-default-url.conf
+      MOSQUITTO_ACL=/tmp/vps-mqtt-acl-default-url
+      MOSQUITTO_PASSWD=/tmp/vps-mqtt-passwd-default-url
+      get_primary_ip() { printf '%s\\n' '5.6.7.8'; }
+      install_dependencies() { :; }
+      systemctl() { :; }
+      mosquitto_passwd() { :; }
+      cp() { command cp "$@"; }
+      setup_master <<'EOF'
+
+1883
+9090
+EOF
+      cat "${CONFIG_FILE}"
+    """)
+
+    output = self.run_bash(script)
+
+    self.assertIn('PUBLIC_URL="http://5.6.7.8:9090"', output)
 
   def test_register_agent_invokes_agent_and_service_setup(self):
     script = textwrap.dedent("""
