@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.18}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.19}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -647,7 +647,12 @@ register_agent() {
   systemctl daemon-reload
   systemctl enable "${PANEL_NAME}-agent.service" >/dev/null 2>&1 || true
   systemctl restart "${PANEL_NAME}-agent.service" >/dev/null 2>&1 || true
-  green "Agent 已注册并启动。"
+  if python3 "${AGENT_FILE}" --config "${AGENT_CONFIG}" startup-check; then
+    green "Agent 已注册并通过 MQTT 自检。"
+  else
+    yellow "Agent 已注册，但 MQTT 自检失败。请检查主控 MQTT 端口、防火墙、安全组和账号。"
+    yellow "可查看日志：journalctl -u ${PANEL_NAME}-agent.service -n 80 --no-pager"
+  fi
 }
 
 handle_choice() {

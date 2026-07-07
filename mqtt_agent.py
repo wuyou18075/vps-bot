@@ -9,6 +9,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -304,7 +305,17 @@ def mqtt_publish(config, topic, payload, retain=False):
   command = ["mosquitto_pub", *mqtt_base_args(config), "-t", topic, "-m", payload]
   if retain:
     command.append("-r")
-  subprocess.run(command, check=False, timeout=20)
+  try:
+    result = subprocess.run(
+      command,
+      capture_output=True,
+      text=True,
+      check=False,
+      timeout=20,
+    )
+  except (FileNotFoundError, subprocess.TimeoutExpired):
+    return False
+  return result.returncode == 0
 
 
 def cleanup_agent_install(config):
@@ -362,7 +373,42 @@ def publish_status(config):
     "ip": get_public_ip(),
     "ts": int(time.time()),
   }, ensure_ascii=False)
-  mqtt_publish(config, mqtt_topic(config, f"nodes/{node_id}/status"), payload, retain=True)
+  return mqtt_publish(config, mqtt_topic(config, f"nodes/{node_id}/status"), payload, retain=True)
+
+
+def command_result_payload(config, result, fallback_command):
+  """Build a command result payload for MQTT publishing."""
+  if isinstance(result, dict):
+    text = result.get("text", "")
+    command = result.get("command", fallback_command)
+    metrics = result.get("metrics", {})
+  else:
+    text = result
+    command = fallback_command
+    metrics = {}
+  return json.dumps({
+    "id": f"startup-{int(time.time())}",
+    "node_id": config["NODE_ID"],
+    "name": config.get("NODE_NAME") or socket.gethostname(),
+    "command": command,
+    "ok": True,
+    "text": text,
+    "metrics": metrics,
+    "ts": int(time.time()),
+  }, ensure_ascii=False)
+
+
+def publish_startup_snapshot(config):
+  """Publish an immediate heartbeat and snapshot after registration/startup."""
+  node_id = config["NODE_ID"]
+  status_ok = publish_status(config)
+  result = execute_allowed_command(config, "/snapshot")
+  snapshot_ok = mqtt_publish(
+    config,
+    mqtt_topic(config, f"results/{node_id}"),
+    command_result_payload(config, result, "snapshot"),
+  )
+  return bool(status_ok and snapshot_ok)
 
 
 def status_heartbeat_loop(config, interval_seconds=60):
@@ -388,24 +434,13 @@ def handle_payload(config, raw_payload):
   if not verify_command_signature(payload, config["COMMAND_SECRET"]):
     return None
   result = execute_allowed_command(config, payload["command"])
-  if isinstance(result, dict):
-    text = result.get("text", "")
-    command = result.get("command", payload["command"].lstrip("/"))
-    metrics = result.get("metrics", {})
-  else:
-    text = result
-    command = payload["command"].lstrip("/").split()[0]
-    metrics = {}
-  return json.dumps({
-    "id": payload.get("id"),
-    "node_id": config["NODE_ID"],
-    "name": config.get("NODE_NAME") or socket.gethostname(),
-    "command": command,
-    "ok": True,
-    "text": text,
-    "metrics": metrics,
-    "ts": int(time.time()),
-  }, ensure_ascii=False)
+  data = json.loads(command_result_payload(
+    config,
+    result,
+    payload["command"].lstrip("/").split()[0],
+  ))
+  data["id"] = payload.get("id")
+  return json.dumps(data, ensure_ascii=False)
 
 
 def listen(config_path=DEFAULT_CONFIG):
@@ -470,6 +505,7 @@ def main():
   register.add_argument("--token", required=True)
   register.add_argument("--node-name", default="")
   sub.add_parser("listen")
+  sub.add_parser("startup-check")
   args = parser.parse_args()
 
   if args.command == "register":
@@ -479,6 +515,11 @@ def main():
   if args.command == "listen":
     listen(args.config)
     return
+  if args.command == "startup-check":
+    config = load_env(args.config)
+    ok = publish_startup_snapshot(config)
+    print("MQTT 自检通过，已发送心跳和快照。" if ok else "MQTT 自检失败，未能发送心跳或快照。")
+    sys.exit(0 if ok else 1)
   parser.print_help()
 
 

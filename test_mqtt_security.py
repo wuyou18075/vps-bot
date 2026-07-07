@@ -392,6 +392,24 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertEqual(1.25, snapshot["daily_used_gb"])
     self.assertEqual(31.0, snapshot["latency_ms"])
 
+  def test_store_command_result_marks_node_online(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+
+      db.store_command_result({
+        "id": "cmd-1",
+        "node_id": node["node_id"],
+        "command": "status",
+        "ok": True,
+        "text": "ok",
+        "ts": 1800000000,
+      })
+      updated = db.list_nodes()[0]
+
+    self.assertEqual("online", updated["status"])
+    self.assertEqual(1800000000, updated["last_seen"])
+
   def test_request_snapshot_dispatches_to_online_nodes_only(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
@@ -698,6 +716,34 @@ class MqttSecurityTest(unittest.TestCase):
       mqtt_agent.start_status_heartbeat(config)
 
     self.assertTrue(thread.call_args.kwargs["daemon"])
+
+  def test_agent_publish_startup_snapshot_sends_status_and_metrics(self):
+    config = {
+      "NODE_ID": "node",
+      "NODE_NAME": "test7",
+      "MQTT_HOST": "127.0.0.1",
+      "MQTT_USERNAME": "u",
+      "MQTT_PASSWORD": "p",
+      "COMMAND_SECRET": "s",
+    }
+
+    with mock.patch("mqtt_agent.collect_snapshot_metrics") as collect:
+      collect.return_value = {
+        "monthly_used_gb": 1.0,
+        "daily_used_gb": 0.1,
+        "network_rx_mbps": 2.0,
+        "network_tx_mbps": 3.0,
+        "cpu_percent": 4.0,
+        "memory_percent": 5.0,
+        "latency_ms": 6.0,
+      }
+      with mock.patch("mqtt_agent.mqtt_publish", return_value=True) as publish:
+        ok = mqtt_agent.publish_startup_snapshot(config)
+
+    self.assertTrue(ok)
+    self.assertEqual(2, publish.call_count)
+    self.assertIn("nodes/node/status", publish.call_args_list[0].args[1])
+    self.assertIn("results/node", publish.call_args_list[1].args[1])
 
   def test_agent_uninstall_command_schedules_cleanup(self):
     with mock.patch("mqtt_agent.delayed_cleanup_agent") as cleanup:

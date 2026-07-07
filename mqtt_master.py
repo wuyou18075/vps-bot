@@ -584,6 +584,10 @@ class MasterDatabase:
     ts = int(payload.get("ts") or time.time())
     with self.connect() as db:
       db.execute(
+        "UPDATE nodes SET status='online',last_seen=? WHERE node_id=?",
+        (ts, node_id),
+      )
+      db.execute(
         """
         INSERT INTO command_results(command_id,node_id,command,ok,text,ts)
         VALUES(?,?,?,?,?,?)
