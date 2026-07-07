@@ -457,6 +457,21 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertIn("WebSocket", html)
     self.assertIn("/ws/monitor", html)
     self.assertIn("/api/monitor", html)
+    self.assertIn("ws-state", html)
+    self.assertIn("last-refresh", html)
+
+  def test_monitor_page_shows_snapshot_and_heartbeat_times(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+      db.update_node_status(node["node_id"], "online", "1.1.1.1")
+      handler = object.__new__(mqtt_master.MasterRequestHandler)
+      handler.server = type("Server", (), {"db": db, "config": {}})()
+
+      html = handler.render_monitor("admin")
+
+    self.assertIn("快照", html)
+    self.assertIn("心跳", html)
 
   def test_monitor_payload_contains_nodes_and_state(self):
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -486,6 +501,8 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertEqual("未运行", payload["monitor_state"])
     self.assertEqual("test7", payload["nodes"][0]["name"])
     self.assertEqual("online", payload["nodes"][0]["status"])
+    self.assertEqual("1.1.1.1", payload["nodes"][0]["public_ip"])
+    self.assertGreater(payload["nodes"][0]["last_seen"], 0)
     self.assertEqual(2.0, payload["nodes"][0]["monthly_used_gb"])
 
   def test_register_replaces_existing_node_from_same_agent(self):
@@ -563,11 +580,32 @@ class MqttSecurityTest(unittest.TestCase):
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
       db.set_setting("MQTT_MASTER_PASSWORD", "persisted")
       db.set_setting("MQTT_HOST", "10.0.0.1")
+      db.set_setting("MQTT_LOCAL_HOST", "127.0.0.1")
 
       config = mqtt_master.runtime_config(db, {"MQTT_HOST": "127.0.0.1"})
 
     self.assertEqual("127.0.0.1", config["MQTT_HOST"])
+    self.assertEqual("127.0.0.1", config["MQTT_LOCAL_HOST"])
     self.assertEqual("persisted", config["MQTT_MASTER_PASSWORD"])
+
+  def test_master_mqtt_clients_use_loopback_by_default(self):
+    args = mqtt_master.mqtt_base_args({
+      "MQTT_HOST": "15.165.22.159",
+      "MQTT_PORT": "1883",
+      "MQTT_MASTER_USER": "vps_master",
+      "MQTT_MASTER_PASSWORD": "secret",
+    })
+
+    self.assertIn("127.0.0.1", args)
+    self.assertNotIn("15.165.22.159", args)
+
+  def test_master_mqtt_clients_allow_local_host_override(self):
+    args = mqtt_master.mqtt_base_args({
+      "MQTT_LOCAL_HOST": "10.0.0.10",
+      "MQTT_HOST": "15.165.22.159",
+    })
+
+    self.assertIn("10.0.0.10", args)
 
   def test_delete_node_dispatches_uninstall_before_removing_record(self):
     with tempfile.TemporaryDirectory() as temp_dir:

@@ -33,6 +33,7 @@ RUNTIME_SETTING_KEYS = [
   "PUBLIC_URL",
   "RAW_BASE_URL",
   "MQTT_HOST",
+  "MQTT_LOCAL_HOST",
   "MQTT_PORT",
   "MQTT_TOPIC_PREFIX",
   "MQTT_MASTER_USER",
@@ -662,7 +663,7 @@ def publish_mqtt(config, topic, payload):
   """Publish a payload with mosquitto_pub."""
   command = [
     "mosquitto_pub",
-    "-h", config.get("MQTT_HOST", "127.0.0.1"),
+    "-h", master_mqtt_host(config),
     "-p", str(config.get("MQTT_PORT", "1883")),
     "-u", config.get("MQTT_MASTER_USER", "vps_master"),
     "-P", config.get("MQTT_MASTER_PASSWORD", ""),
@@ -675,10 +676,15 @@ def publish_mqtt(config, topic, payload):
     return
 
 
+def master_mqtt_host(config):
+  """Return the broker host used by the master process itself."""
+  return config.get("MQTT_LOCAL_HOST") or "127.0.0.1"
+
+
 def mqtt_base_args(config):
   """Return common mosquitto CLI args."""
   return [
-    "-h", config.get("MQTT_HOST", "127.0.0.1"),
+    "-h", master_mqtt_host(config),
     "-p", str(config.get("MQTT_PORT", "1883")),
     "-u", config.get("MQTT_MASTER_USER", "vps_master"),
     "-P", config.get("MQTT_MASTER_PASSWORD", ""),
@@ -998,6 +1004,8 @@ def monitor_payload(db):
       "memory_percent": float(item.get("memory_percent") or 0),
       "latency_ms": float(item.get("latency_ms") or 0),
       "snapshot_ts": int(item.get("snapshot_ts") or 0),
+      "last_seen": int(item.get("last_seen") or 0),
+      "public_ip": item.get("public_ip") or "",
     })
   return {
     "monitor_state": "运行中" if monitor_until > now else "未运行",
@@ -1592,9 +1600,16 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
 
   def render_monitor(self, user):
     """Render the monitoring snapshot page."""
+    def ts_text(value):
+      timestamp = int(value or 0)
+      if not timestamp:
+        return "暂无"
+      return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
     rows = "\n".join([
       "<tr>"
-      f"<td><strong>{html.escape(item['name'])}</strong><br><span class='muted'>{html.escape(item.get('group_name') or '未分组')}</span></td>"
+      f"<td><strong>{html.escape(item['name'])}</strong><br><span class='muted'>{html.escape(item.get('group_name') or '未分组')}</span>"
+      f"<br><span class='muted'>IP {html.escape(item.get('public_ip') or '未知')}</span></td>"
       f"<td><span class='badge {'ok' if item['status'] == 'online' else ''}'>{html.escape(item['status'])}</span></td>"
       f"<td>{float(item.get('monthly_used_gb') or 0):.2f} / {float(item.get('traffic_total_gb') or 0):.2f} GB<br>"
       f"<span class='muted'>今日 {float(item.get('daily_used_gb') or 0):.2f} GB</span></td>"
@@ -1602,7 +1617,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       f"<td>{float(item.get('cpu_percent') or 0):.1f}%</td>"
       f"<td>{float(item.get('memory_percent') or 0):.1f}%</td>"
       f"<td>{float(item.get('latency_ms') or 0):.1f} ms</td>"
-      f"<td>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(item.get('snapshot_ts') or 0))) if item.get('snapshot_ts') else '暂无'}</td>"
+      f"<td>快照 {ts_text(item.get('snapshot_ts'))}<br><span class='muted'>心跳 {ts_text(item.get('last_seen'))}</span></td>"
       "</tr>"
       for item in self.db.latest_node_snapshots()
     ])
@@ -1612,7 +1627,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
 <div class="topbar">
   <div>
     <h1>VPS 监控展示</h1>
-    <p class="muted">动态监控: <span id="monitor-state">{state}</span></p>
+    <p class="muted">动态监控: <span id="monitor-state">{state}</span> · 连接: <span id="ws-state">连接中</span> · 最后刷新: <span id="last-refresh">暂无</span></p>
   </div>
   <div class="toolbar">
     <a href="/">返回面板</a>
@@ -1630,6 +1645,8 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
 (() => {{
   const body = document.getElementById("monitor-body");
   const state = document.getElementById("monitor-state");
+  const wsState = document.getElementById("ws-state");
+  const lastRefresh = document.getElementById("last-refresh");
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({{
     "&": "&amp;",
     "<": "&lt;",
@@ -1644,26 +1661,35 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   }};
   const row = (item) => `
     <tr>
-      <td><strong>${{esc(item.name)}}</strong><br><span class="muted">${{esc(item.group_name || "未分组")}}</span></td>
+      <td><strong>${{esc(item.name)}}</strong><br><span class="muted">${{esc(item.group_name || "未分组")}}</span><br><span class="muted">IP ${{esc(item.public_ip || "未知")}}</span></td>
       <td><span class="badge ${{item.status === "online" ? "ok" : ""}}">${{esc(item.status || "offline")}}</span></td>
       <td>${{fixed(item.monthly_used_gb)}} / ${{fixed(item.traffic_total_gb)}} GB<br><span class="muted">今日 ${{fixed(item.daily_used_gb)}} GB</span></td>
       <td>↓ ${{fixed(item.network_rx_mbps)}} Mbps<br>↑ ${{fixed(item.network_tx_mbps)}} Mbps</td>
       <td>${{fixed(item.cpu_percent, 1)}}%</td>
       <td>${{fixed(item.memory_percent, 1)}}%</td>
       <td>${{fixed(item.latency_ms, 1)}} ms</td>
-      <td>${{timeText(item.snapshot_ts)}}</td>
+      <td>快照 ${{timeText(item.snapshot_ts)}}<br><span class="muted">心跳 ${{timeText(item.last_seen)}}</span></td>
     </tr>`;
   const render = (data) => {{
     state.textContent = data.monitor_state || "未运行";
+    lastRefresh.textContent = timeText(data.server_ts);
     body.innerHTML = (data.nodes || []).map(row).join("");
   }};
   let socket = null;
   let fallbackTimer = null;
-  const poll = async () => {{
-    const response = await fetch("/api/monitor", {{ cache: "no-store" }});
-    if (response.ok) render(await response.json());
+  const setWsState = (value) => {{
+    wsState.textContent = value;
   }};
-  const startFallback = () => {{
+  const poll = async () => {{
+    try {{
+      const response = await fetch("/api/monitor", {{ cache: "no-store" }});
+      if (response.ok) render(await response.json());
+    }} catch (error) {{
+      setWsState("HTTP 兜底失败");
+    }}
+  }};
+  const startFallback = (label = "HTTP 兜底") => {{
+    setWsState(label);
     if (fallbackTimer) return;
     poll();
     fallbackTimer = setInterval(poll, 5000);
@@ -1685,11 +1711,12 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   if ("WebSocket" in window) {{
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${{scheme}}://${{window.location.host}}/ws/monitor`);
+    socket.onopen = () => setWsState("WebSocket 已连接");
     socket.onmessage = (event) => render(JSON.parse(event.data));
-    socket.onclose = startFallback;
-    socket.onerror = startFallback;
+    socket.onclose = () => startFallback("WebSocket 断开，HTTP 兜底");
+    socket.onerror = () => startFallback("WebSocket 错误，HTTP 兜底");
   }} else {{
-    startFallback();
+    startFallback("浏览器不支持 WebSocket，HTTP 兜底");
   }}
 }})();
 </script>""")

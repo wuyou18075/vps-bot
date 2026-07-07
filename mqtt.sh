@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-vps-mqtt}"
-SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.17}"
+SCRIPT_VERSION="${VPS_MQTT_SCRIPT_VERSION:-2026.07.07.18}"
 VPS_MQTT_TESTING="${VPS_MQTT_TESTING:-0}"
 RAW_BASE_URL="${VPS_MQTT_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/${PANEL_NAME}}"
@@ -57,7 +57,7 @@ pause() {
 }
 
 load_config() {
-  unset PUBLIC_URL MQTT_HOST MQTT_PORT MQTT_TOPIC_PREFIX WEB_HOST WEB_PORT
+  unset PUBLIC_URL MQTT_HOST MQTT_LOCAL_HOST MQTT_PORT MQTT_TOPIC_PREFIX WEB_HOST WEB_PORT
   unset MQTT_MASTER_USER MQTT_MASTER_PASSWORD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
   if [ -f "${CONFIG_FILE}" ]; then
     # shellcheck disable=SC1090
@@ -292,6 +292,7 @@ save_runtime_settings() {
     --set "PUBLIC_URL=${PUBLIC_URL:-}" \
     --set "RAW_BASE_URL=${RAW_BASE_URL}" \
     --set "MQTT_HOST=${MQTT_HOST:-}" \
+    --set "MQTT_LOCAL_HOST=${MQTT_LOCAL_HOST:-}" \
     --set "MQTT_PORT=${MQTT_PORT:-}" \
     --set "MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-vps-bot}" \
     --set "MQTT_MASTER_USER=${MQTT_MASTER_USER:-vps_master}" \
