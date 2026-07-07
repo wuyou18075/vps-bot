@@ -406,6 +406,20 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertIn("1 台", message)
     dispatch.assert_called_once_with(db, {}, first["node_id"], "/snapshot")
 
+  def test_request_snapshot_can_dispatch_to_all_nodes_for_recovery(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      first = db.register_node("online")
+      second = db.register_node("offline")
+      db.update_node_status(first["node_id"], "online", "1.1.1.1")
+      db.update_node_status(second["node_id"], "offline", "2.2.2.2")
+
+      with mock.patch("mqtt_master.dispatch_command") as dispatch:
+        message = mqtt_master.request_snapshot(db, {}, online_only=False)
+
+    self.assertIn("2 台", message)
+    self.assertEqual(2, dispatch.call_count)
+
   def test_monitor_page_shows_online_nodes_without_snapshot(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
@@ -417,6 +431,19 @@ class MqttSecurityTest(unittest.TestCase):
       html = handler.render_monitor("admin")
 
     self.assertIn("online", html)
+    self.assertIn("暂无", html)
+
+  def test_monitor_page_shows_offline_registered_nodes_for_diagnostics(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("offline")
+      db.update_node_status(node["node_id"], "offline", "")
+      handler = object.__new__(mqtt_master.MasterRequestHandler)
+      handler.server = type("Server", (), {"db": db, "config": {}})()
+
+      html = handler.render_monitor("admin")
+
+    self.assertIn("offline", html)
     self.assertIn("暂无", html)
 
   def test_register_replaces_existing_node_from_same_agent(self):
@@ -458,6 +485,19 @@ class MqttSecurityTest(unittest.TestCase):
     self.assertIn("vps_master", called_users)
     self.assertIn(node["mqtt_username"], called_users)
 
+  def test_refresh_mqtt_auth_restarts_mosquitto_after_credentials_change(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+
+      with mock.patch("mqtt_master.subprocess.run") as run:
+        mqtt_master.refresh_mqtt_auth(db, {
+          "MOSQUITTO_ACL": os.path.join(temp_dir, "acl"),
+          "MOSQUITTO_PASSWD": os.path.join(temp_dir, "passwd"),
+        })
+
+    commands = [call.args[0] for call in run.call_args_list]
+    self.assertIn(["systemctl", "restart", "mosquitto"], commands)
+
   def test_delete_node_dispatches_uninstall_before_removing_record(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
@@ -494,22 +534,61 @@ class MqttSecurityTest(unittest.TestCase):
       config = os.path.join(temp_dir, "agent.env")
       mqtt_agent.write_env(config, {"NODE_ID": "old-node"})
 
-      with mock.patch("mqtt_agent.urllib.request.urlopen") as open_url:
-        open_url.return_value.__enter__.return_value.read.return_value = json.dumps({
-          "node_id": "new-node",
-          "name": "new",
-          "mqtt_host": "127.0.0.1",
-          "mqtt_port": "1883",
-          "mqtt_username": "u",
-          "mqtt_password": "p",
-          "topic_prefix": "vps-bot",
-          "command_secret": "s",
-        }).encode("utf-8")
-        mqtt_agent.register_agent("http://master", "token", "new", config)
+      with mock.patch("mqtt_agent.get_public_ip", return_value=""):
+        with mock.patch("mqtt_agent.local_ip_addresses", return_value={"127.0.0.1"}):
+          with mock.patch("mqtt_agent.urllib.request.urlopen") as open_url:
+            open_url.return_value.__enter__.return_value.read.return_value = json.dumps({
+              "node_id": "new-node",
+              "name": "new",
+              "mqtt_host": "127.0.0.1",
+              "mqtt_port": "1883",
+              "mqtt_username": "u",
+              "mqtt_password": "p",
+              "topic_prefix": "vps-bot",
+              "command_secret": "s",
+            }).encode("utf-8")
+            mqtt_agent.register_agent("http://master", "token", "new", config)
 
       body = open_url.call_args.args[0].data.decode("utf-8")
 
     self.assertIn("existing_node_id=old-node", body)
+
+  def test_agent_registration_uses_loopback_mqtt_for_self_master(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      config = os.path.join(temp_dir, "agent.env")
+
+      with mock.patch("mqtt_agent.get_public_ip", return_value="15.165.22.159"):
+        with mock.patch("mqtt_agent.local_ip_addresses", return_value={"10.0.0.1"}):
+          with mock.patch("mqtt_agent.urllib.request.urlopen") as open_url:
+            open_url.return_value.__enter__.return_value.read.return_value = json.dumps({
+              "node_id": "node",
+              "name": "self",
+              "mqtt_host": "15.165.22.159",
+              "mqtt_port": "1883",
+              "mqtt_username": "u",
+              "mqtt_password": "p",
+              "topic_prefix": "vps-bot",
+              "command_secret": "s",
+            }).encode("utf-8")
+            mqtt_agent.register_agent("http://15.165.22.159:8088", "token", "self", config)
+
+      saved = mqtt_agent.load_env(config)
+
+    self.assertEqual("127.0.0.1", saved["MQTT_HOST"])
+
+  def test_agent_listen_starts_periodic_status_heartbeat(self):
+    config = {
+      "NODE_ID": "node",
+      "MQTT_HOST": "127.0.0.1",
+      "MQTT_USERNAME": "u",
+      "MQTT_PASSWORD": "p",
+      "COMMAND_SECRET": "s",
+    }
+
+    with mock.patch("mqtt_agent.threading.Thread") as thread:
+      mqtt_agent.start_status_heartbeat(config)
+
+    self.assertTrue(thread.call_args.kwargs["daemon"])
 
   def test_agent_uninstall_command_schedules_cleanup(self):
     with mock.patch("mqtt_agent.delayed_cleanup_agent") as cleanup:

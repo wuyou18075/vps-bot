@@ -200,6 +200,44 @@ def get_public_ip():
   return ""
 
 
+def local_ip_addresses():
+  """Return local IP addresses for self-registration detection."""
+  addresses = {"127.0.0.1", "::1", "localhost"}
+  try:
+    addresses.update(socket.gethostbyname_ex(socket.gethostname())[2])
+  except OSError:
+    pass
+  try:
+    result = subprocess.run(
+      ["hostname", "-I"],
+      capture_output=True,
+      text=True,
+      timeout=5,
+      check=False,
+    )
+    addresses.update(item for item in result.stdout.split() if item)
+  except (OSError, subprocess.TimeoutExpired):
+    pass
+  return addresses
+
+
+def is_self_master(master_url):
+  """Return whether the master URL points at this VPS."""
+  host = urllib.parse.urlparse(master_url).hostname or ""
+  if not host:
+    return False
+  candidates = local_ip_addresses()
+  public_ip = get_public_ip()
+  if public_ip:
+    candidates.add(public_ip)
+  return host in candidates
+
+
+def mqtt_host_for_registration(master_url, mqtt_host):
+  """Use loopback MQTT when an agent registers to its own master."""
+  return "127.0.0.1" if is_self_master(master_url) else mqtt_host
+
+
 def execute_allowed_command(config, text):
   """Execute one allow-listed command."""
   node_name = config.get("NODE_NAME") or socket.gethostname()
@@ -327,6 +365,23 @@ def publish_status(config):
   mqtt_publish(config, mqtt_topic(config, f"nodes/{node_id}/status"), payload, retain=True)
 
 
+def status_heartbeat_loop(config, interval_seconds=60):
+  """Publish status periodically so transient startup failures recover."""
+  while True:
+    try:
+      publish_status(config)
+    except Exception:
+      pass
+    time.sleep(interval_seconds)
+
+
+def start_status_heartbeat(config):
+  """Start periodic status heartbeat publishing."""
+  thread = threading.Thread(target=status_heartbeat_loop, args=(config,), daemon=True)
+  thread.start()
+  return thread
+
+
 def handle_payload(config, raw_payload):
   """Verify and execute one command payload."""
   payload = json.loads(raw_payload)
@@ -357,7 +412,7 @@ def listen(config_path=DEFAULT_CONFIG):
   """Listen for signed MQTT commands."""
   config = load_env(config_path)
   config["_CONFIG_PATH"] = config_path
-  publish_status(config)
+  start_status_heartbeat(config)
   topic = mqtt_topic(config, f"commands/{config['NODE_ID']}")
   command = ["mosquitto_sub", *mqtt_base_args(config), "-v", "-t", topic]
   while True:
@@ -395,7 +450,7 @@ def register_agent(master_url, token, node_name, config_path=DEFAULT_CONFIG):
   write_env(config_path, {
     "NODE_ID": payload["node_id"],
     "NODE_NAME": payload["name"],
-    "MQTT_HOST": payload["mqtt_host"],
+    "MQTT_HOST": mqtt_host_for_registration(master_url, payload["mqtt_host"]),
     "MQTT_PORT": payload["mqtt_port"],
     "MQTT_USERNAME": payload["mqtt_username"],
     "MQTT_PASSWORD": payload["mqtt_password"],

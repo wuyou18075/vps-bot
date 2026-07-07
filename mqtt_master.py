@@ -253,7 +253,7 @@ def refresh_mqtt_auth(db, config):
       check=False,
       capture_output=True,
     )
-  subprocess.run(["systemctl", "reload", "mosquitto"], check=False, capture_output=True)
+  subprocess.run(["systemctl", "restart", "mosquitto"], check=False, capture_output=True)
   return True
 
 
@@ -933,14 +933,15 @@ def request_snapshot(db, config, online_only=True):
     nodes = [node for node in nodes if node["status"] == "online"]
   for node in nodes:
     dispatch_command(db, config, node["node_id"], "/snapshot")
-  return f"已向 {len(nodes)} 台在线 VPS 请求快照。"
+  scope = "在线 VPS" if online_only else "VPS"
+  return f"已向 {len(nodes)} 台{scope}请求快照。"
 
 
 def dynamic_monitor_loop(db, config, until_ts, interval_seconds=60):
   """Request snapshots periodically until the configured deadline."""
   while int(time.time()) < until_ts:
     try:
-      request_snapshot(db, config, online_only=True)
+      request_snapshot(db, config, online_only=False)
     except Exception:
       pass
     time.sleep(interval_seconds)
@@ -1496,7 +1497,6 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       f"<td>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(item.get('snapshot_ts') or 0))) if item.get('snapshot_ts') else '暂无'}</td>"
       "</tr>"
       for item in self.db.latest_node_snapshots()
-      if item["status"] == "online"
     ])
     monitor_until = int(self.db.get_setting("monitor_until", "0") or "0")
     state = "运行中" if monitor_until > int(time.time()) else "未运行"
@@ -1588,7 +1588,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   def handle_snapshot(self, user):
     """Request a one-time monitoring snapshot."""
     try:
-      message = request_snapshot(self.db, self.config, online_only=True)
+      message = request_snapshot(self.db, self.config, online_only=False)
     except ValueError as error:
       message = str(error)
     self.db.audit(user, "request_snapshot", message)
