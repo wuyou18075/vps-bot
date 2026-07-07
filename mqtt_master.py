@@ -29,6 +29,7 @@ DEFAULT_TOPIC_PREFIX = "vps-bot"
 ALLOWED_COMMANDS = {
   "ping",
   "use",
+  "snapshot",
   "speed",
   "status",
   "report",
@@ -36,6 +37,12 @@ ALLOWED_COMMANDS = {
   "top",
   "uptime",
   "services",
+}
+SUPPORTED_THEMES = {
+  "light": "白色",
+  "dark": "黑色",
+  "eye": "护眼绿",
+  "blue": "浅蓝色",
 }
 
 
@@ -291,6 +298,26 @@ class MasterDatabase:
           created_at INTEGER NOT NULL,
           last_seen INTEGER
         );
+        CREATE TABLE IF NOT EXISTS command_results (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          command_id TEXT,
+          node_id TEXT NOT NULL,
+          command TEXT NOT NULL,
+          ok INTEGER NOT NULL,
+          text TEXT NOT NULL,
+          ts INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS node_snapshots (
+          node_id TEXT PRIMARY KEY,
+          monthly_used_gb REAL NOT NULL DEFAULT 0,
+          daily_used_gb REAL NOT NULL DEFAULT 0,
+          network_rx_mbps REAL NOT NULL DEFAULT 0,
+          network_tx_mbps REAL NOT NULL DEFAULT 0,
+          cpu_percent REAL NOT NULL DEFAULT 0,
+          memory_percent REAL NOT NULL DEFAULT 0,
+          latency_ms REAL NOT NULL DEFAULT 0,
+          ts INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS settings (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
@@ -303,6 +330,18 @@ class MasterDatabase:
           detail TEXT NOT NULL
         );
       """)
+      self.ensure_column(db, "nodes", "group_name", "TEXT NOT NULL DEFAULT ''")
+      self.ensure_column(db, "nodes", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+      self.ensure_column(db, "nodes", "traffic_total_gb", "REAL NOT NULL DEFAULT 0")
+      self.ensure_column(db, "nodes", "traffic_alert_percent", "REAL NOT NULL DEFAULT 80")
+      self.ensure_column(db, "nodes", "daily_report_time", "TEXT NOT NULL DEFAULT ''")
+      self.ensure_column(db, "nodes", "monthly_report_time", "TEXT NOT NULL DEFAULT ''")
+
+  def ensure_column(self, db, table, column, definition):
+    """Add a column to an existing SQLite table when missing."""
+    existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+      db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
   def has_admin(self):
     """Return whether an admin user exists."""
@@ -421,8 +460,33 @@ class MasterDatabase:
   def list_nodes(self):
     """Return all registered nodes."""
     with self.connect() as db:
-      rows = db.execute("SELECT * FROM nodes ORDER BY rowid").fetchall()
+      rows = db.execute(
+        "SELECT * FROM nodes ORDER BY group_name COLLATE NOCASE, sort_order, rowid",
+      ).fetchall()
     return [dict(row) for row in rows]
+
+  def update_node_profile(self, node_id, values):
+    """Update editable node profile fields."""
+    with self.connect() as db:
+      db.execute(
+        """
+        UPDATE nodes
+        SET name=?,group_name=?,sort_order=?,traffic_total_gb=?,
+            traffic_alert_percent=?,daily_report_time=?,monthly_report_time=?
+        WHERE node_id=?
+        """,
+        (
+          values["name"],
+          values["group_name"],
+          values["sort_order"],
+          values["traffic_total_gb"],
+          values["traffic_alert_percent"],
+          values["daily_report_time"],
+          values["monthly_report_time"],
+          node_id,
+        ),
+      )
+      db.commit()
 
   def update_node_status(self, node_id, status, public_ip=""):
     """Update a node's status heartbeat."""
@@ -437,7 +501,65 @@ class MasterDatabase:
     """Delete a registered node."""
     with self.connect() as db:
       db.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+      db.execute("DELETE FROM node_snapshots WHERE node_id=?", (node_id,))
       db.commit()
+
+  def store_command_result(self, payload):
+    """Store a command result and its structured snapshot metrics."""
+    node_id = payload.get("node_id", "")
+    command = payload.get("command", "")
+    ts = int(payload.get("ts") or time.time())
+    with self.connect() as db:
+      db.execute(
+        """
+        INSERT INTO command_results(command_id,node_id,command,ok,text,ts)
+        VALUES(?,?,?,?,?,?)
+        """,
+        (
+          payload.get("id", ""),
+          node_id,
+          command,
+          1 if payload.get("ok") else 0,
+          payload.get("text", ""),
+          ts,
+        ),
+      )
+      metrics = payload.get("metrics") or {}
+      if metrics:
+        db.execute(
+          """
+          INSERT OR REPLACE INTO node_snapshots(
+            node_id,monthly_used_gb,daily_used_gb,network_rx_mbps,network_tx_mbps,
+            cpu_percent,memory_percent,latency_ms,ts
+          ) VALUES(?,?,?,?,?,?,?,?,?)
+          """,
+          (
+            node_id,
+            float(metrics.get("monthly_used_gb") or 0),
+            float(metrics.get("daily_used_gb") or 0),
+            float(metrics.get("network_rx_mbps") or 0),
+            float(metrics.get("network_tx_mbps") or 0),
+            float(metrics.get("cpu_percent") or 0),
+            float(metrics.get("memory_percent") or 0),
+            float(metrics.get("latency_ms") or 0),
+            ts,
+          ),
+        )
+      db.commit()
+
+  def latest_node_snapshots(self):
+    """Return nodes with their latest monitoring snapshot."""
+    with self.connect() as db:
+      rows = db.execute(
+        """
+        SELECT n.*,s.monthly_used_gb,s.daily_used_gb,s.network_rx_mbps,
+               s.network_tx_mbps,s.cpu_percent,s.memory_percent,s.latency_ms,s.ts AS snapshot_ts
+        FROM nodes n
+        LEFT JOIN node_snapshots s ON s.node_id=n.node_id
+        ORDER BY n.group_name COLLATE NOCASE,n.sort_order,n.rowid
+        """,
+      ).fetchall()
+    return [dict(row) for row in rows]
 
   def set_setting(self, key, value):
     """Persist a setting."""
@@ -607,6 +729,9 @@ def mqtt_event_loop(db, config):
             result = json.loads(payload)
           except json.JSONDecodeError:
             continue
+          db.store_command_result(result)
+          if result.get("command") == "snapshot":
+            continue
           if result.get("text"):
             send_telegram(config, result["text"])
     except Exception:
@@ -638,6 +763,15 @@ def dispatch_command(db, config, node_id, command_text):
   db.audit("web", "dispatch_command", f"{node['name']} {command_text}")
 
 
+def save_theme(db, theme):
+  """Persist a supported web theme."""
+  value = (theme or "").strip()
+  if value not in SUPPORTED_THEMES:
+    return False
+  db.set_setting("web_theme", value)
+  return True
+
+
 def save_telegram_settings(db, username, form):
   """Persist Telegram settings after verifying the current login password."""
   user = db.get_user(username)
@@ -651,6 +785,58 @@ def save_telegram_settings(db, username, form):
   db.set_setting("telegram_chat_id", chat_id)
   db.audit(username, "save_telegram", "updated and tested")
   return True, "Telegram 绑定成功，测试消息已发送。"
+
+
+def delete_telegram_settings(db, username, current_password):
+  """Delete Telegram binding after verifying the current login password."""
+  user = db.get_user(username)
+  if not user or not verify_password(current_password or "", user["password_hash"]):
+    return False, "登录密码错误，未删除 Telegram 配置。"
+  db.set_setting("telegram_token", "")
+  db.set_setting("telegram_chat_id", "")
+  db.audit(username, "delete_telegram", "deleted")
+  return True, "Telegram 绑定已删除。"
+
+
+def parse_float_field(value, default=0.0):
+  """Parse a non-negative float form field."""
+  raw = str(value or "").strip()
+  if not raw:
+    return default
+  number = float(raw)
+  if number < 0:
+    raise ValueError("数值不能小于 0")
+  return number
+
+
+def parse_int_field(value, default=0):
+  """Parse an integer form field."""
+  raw = str(value or "").strip()
+  if not raw:
+    return default
+  return int(raw)
+
+
+def update_node_profile(db, node_id, form):
+  """Validate and persist editable node fields."""
+  name = (form.get("name") or "").strip()[:80]
+  if not name:
+    return False, "节点名称不能为空。"
+  try:
+    values = {
+      "name": name,
+      "group_name": (form.get("group_name") or "").strip()[:80],
+      "sort_order": parse_int_field(form.get("sort_order"), 0),
+      "traffic_total_gb": parse_float_field(form.get("traffic_total_gb"), 0),
+      "traffic_alert_percent": min(parse_float_field(form.get("traffic_alert_percent"), 80), 100),
+      "daily_report_time": (form.get("daily_report_time") or "").strip()[:20],
+      "monthly_report_time": (form.get("monthly_report_time") or "").strip()[:20],
+    }
+  except ValueError:
+    return False, "节点配置格式不正确。"
+  db.update_node_profile(node_id, values)
+  db.audit("web", "update_node_profile", name)
+  return True, "节点配置已保存。"
 
 
 def create_registration_command_for_web(db, config, name=""):
@@ -692,6 +878,26 @@ def handle_node_action(db, config, node_id, action):
   return "不支持的操作。"
 
 
+def request_snapshot(db, config, online_only=True):
+  """Dispatch a snapshot command to registered nodes."""
+  nodes = db.list_nodes()
+  if online_only:
+    nodes = [node for node in nodes if node["status"] == "online"]
+  for node in nodes:
+    dispatch_command(db, config, node["node_id"], "/snapshot")
+  return f"已向 {len(nodes)} 台在线 VPS 请求快照。"
+
+
+def dynamic_monitor_loop(db, config, until_ts, interval_seconds=60):
+  """Request snapshots periodically until the configured deadline."""
+  while int(time.time()) < until_ts:
+    try:
+      request_snapshot(db, config, online_only=True)
+    except Exception:
+      pass
+    time.sleep(interval_seconds)
+
+
 def telegram_help_text(db):
   """Return Telegram command help text."""
   return "\n".join([
@@ -699,6 +905,7 @@ def telegram_help_text(db):
     "支持命令:",
     "/select 选择 VPS 范围",
     "/nodes 查看已注册 VPS",
+    "/snapshot 获取监控快照",
     "/ping [目标]",
     "/use",
     "/speed",
@@ -853,7 +1060,7 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     self.send_header("X-Frame-Options", "DENY")
     self.send_header("X-Content-Type-Options", "nosniff")
     self.send_header("Referrer-Policy", "no-referrer")
-    self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'")
+    self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'")
     self.end_headers()
     self.wfile.write(payload)
 
@@ -882,7 +1089,13 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     return user
 
   def page(self, title, content):
-    """Wrap content in a minimal panel layout."""
+    """Wrap content in the web panel layout."""
+    try:
+      theme = self.db.get_setting("web_theme", "light")
+    except Exception:
+      theme = "light"
+    if theme not in SUPPORTED_THEMES:
+      theme = "light"
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -890,18 +1103,55 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
   <style>
-    body {{ margin: 0; font-family: system-ui, sans-serif; background: #f6f7f9; color: #15171a; }}
-    main {{ max-width: 980px; margin: 32px auto; padding: 0 18px; }}
-    section, form {{ background: #fff; border: 1px solid #d9dde3; border-radius: 8px; padding: 18px; margin: 14px 0; }}
-    input, select, button {{ font: inherit; padding: 9px 10px; margin: 5px 0; }}
-    input, select {{ width: min(420px, 100%); border: 1px solid #bcc3cc; border-radius: 6px; }}
-    button {{ border: 0; border-radius: 6px; background: #155eef; color: #fff; cursor: pointer; }}
-    table {{ width: 100%; border-collapse: collapse; background: #fff; }}
-    th, td {{ border-bottom: 1px solid #e2e5ea; padding: 9px; text-align: left; }}
-    .muted {{ color: #646b75; }}
+    :root {{
+      --bg: #f5f7fb; --panel: #ffffff; --text: #141820; --muted: #626b7a;
+      --line: #d9e0ea; --accent: #155eef; --accent-text: #ffffff; --soft: #eef3ff;
+      --danger: #c9372c; --ok: #1f845a;
+    }}
+    body.theme-dark {{
+      --bg: #111418; --panel: #1b2028; --text: #f4f7fb; --muted: #a8b3c4;
+      --line: #303846; --accent: #6ea8ff; --accent-text: #07111f; --soft: #182337;
+      --danger: #ff766f; --ok: #6bd6a2;
+    }}
+    body.theme-eye {{
+      --bg: #edf5e8; --panel: #fbfff7; --text: #172015; --muted: #64735e;
+      --line: #cadac1; --accent: #397a3b; --accent-text: #ffffff; --soft: #e3f1dc;
+    }}
+    body.theme-blue {{
+      --bg: #edf7ff; --panel: #ffffff; --text: #102033; --muted: #607286;
+      --line: #c9dff2; --accent: #2176c7; --accent-text: #ffffff; --soft: #dff0ff;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }}
+    main {{ max-width: 1180px; margin: 24px auto; padding: 0 18px 42px; }}
+    h1 {{ margin: 0 0 6px; font-size: 28px; }}
+    h2 {{ margin: 0; font-size: 18px; }}
+    a {{ color: var(--accent); }}
+    .topbar, .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 14px 0; box-shadow: 0 8px 24px rgba(15,23,42,.06); }}
+    .topbar {{ display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }}
+    .toolbar {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+    .grid {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }}
+    .stat {{ background: var(--soft); border-radius: 8px; padding: 12px; }}
+    form.inline {{ display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }}
+    input, select, button {{ font: inherit; padding: 9px 10px; margin: 4px 0; }}
+    input, select {{ max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }}
+    button {{ border: 0; border-radius: 6px; background: var(--accent); color: var(--accent-text); cursor: pointer; }}
+    button.secondary {{ background: var(--soft); color: var(--text); border: 1px solid var(--line); }}
+    button.danger {{ background: var(--danger); color: #fff; }}
+    table {{ width: 100%; border-collapse: collapse; background: var(--panel); }}
+    th, td {{ border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; }}
+    th {{ color: var(--muted); font-weight: 600; }}
+    details {{ margin-top: 8px; }}
+    summary {{ cursor: pointer; color: var(--accent); }}
+    .muted {{ color: var(--muted); }}
+    .badge {{ display: inline-block; border-radius: 999px; padding: 2px 8px; background: var(--soft); color: var(--text); }}
+    .badge.ok {{ color: var(--ok); }}
+    .node-edit {{ display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 8px; }}
+    textarea {{ width: 100%; min-height: 120px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); padding: 10px; }}
+    @media (max-width: 720px) {{ table, thead, tbody, th, td, tr {{ display: block; }} th {{ display: none; }} td {{ padding: 8px 0; }} }}
   </style>
 </head>
-<body><main>{content}</main></body></html>"""
+<body class="theme-{html.escape(theme)}"><main>{content}</main></body></html>"""
 
   def do_GET(self):
     """Handle GET requests."""
@@ -929,6 +1179,12 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
         return
       self.send_html(self.render_dashboard(user))
       return
+    if self.path == "/monitor":
+      user = self.require_user()
+      if not user:
+        return
+      self.send_html(self.render_monitor(user))
+      return
     self.send_error(404)
 
   def do_POST(self):
@@ -951,6 +1207,12 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     if self.path == "/telegram":
       self.handle_telegram(user)
       return
+    if self.path == "/telegram-delete":
+      self.handle_telegram_delete(user)
+      return
+    if self.path == "/theme":
+      self.handle_theme(user)
+      return
     if self.path == "/command":
       self.handle_command(user)
       return
@@ -959,6 +1221,15 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       return
     if self.path == "/node-action":
       self.handle_node_action(user)
+      return
+    if self.path == "/node-profile":
+      self.handle_node_profile(user)
+      return
+    if self.path == "/snapshot":
+      self.handle_snapshot(user)
+      return
+    if self.path == "/dynamic-monitor":
+      self.handle_dynamic_monitor(user)
       return
     self.send_error(404)
 
@@ -1027,15 +1298,55 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
   def render_dashboard(self, user):
     """Render dashboard."""
     nodes = self.db.list_nodes()
+    current_theme = self.db.get_setting("web_theme", "light")
+    theme_options = "".join(
+      f"<option value='{html.escape(key)}' {'selected' if key == current_theme else ''}>{html.escape(label)}</option>"
+      for key, label in SUPPORTED_THEMES.items()
+    )
+    telegram_token = self.db.get_setting("telegram_token")
+    telegram_chat_id = self.db.get_setting("telegram_chat_id")
+    if telegram_token and telegram_chat_id:
+      tg_last = f"{telegram_token[:5]}*** / {telegram_chat_id}"
+      telegram_html = f"""
+  <div class="stat">
+    <span class="badge ok">已绑定</span>
+    <strong>{html.escape(tg_last)}</strong>
+    <details>
+      <summary>编辑</summary>
+      <form method="post" action="/telegram">
+        <label>Bot Token<br><input name="token" value="{html.escape(telegram_token)}" required></label><br>
+        <label>Chat ID<br><input name="chat_id" value="{html.escape(telegram_chat_id)}" required></label><br>
+        <label>当前登录密码<br><input name="current_password" type="password" required></label><br>
+        <button>验证并保存</button>
+      </form>
+      <form method="post" action="/telegram-delete" class="inline">
+        <input name="current_password" type="password" placeholder="当前登录密码" required>
+        <button class="danger">删除绑定</button>
+      </form>
+    </details>
+  </div>"""
+    else:
+      telegram_html = """
+  <form method="post" action="/telegram">
+    <label>Bot Token<br><input name="token" required></label><br>
+    <label>Chat ID<br><input name="chat_id" required></label><br>
+    <label>当前登录密码<br><input name="current_password" type="password" required></label><br>
+    <button>验证并绑定</button>
+  </form>"""
     rows = "\n".join([
       "<tr>"
-      f"<td>{html.escape(item['name'])}</td>"
-      f"<td>{html.escape(item['status'])}</td>"
+      f"<td draggable='true'><strong>{html.escape(item['name'])}</strong><br>"
+      f"<span class='muted'>{html.escape(item.get('group_name') or '未分组')}</span></td>"
+      f"<td><span class='badge {'ok' if item['status'] == 'online' else ''}'>{html.escape(item['status'])}</span></td>"
       f"<td>{html.escape(item.get('public_ip') or '')}</td>"
+      f"<td>{html.escape(str(item.get('traffic_total_gb') or 0))} GB<br>"
+      f"<span class='muted'>告警 {html.escape(str(item.get('traffic_alert_percent') or 80))}%</span></td>"
+      f"<td>日报 {html.escape(item.get('daily_report_time') or '关闭')}<br>"
+      f"<span class='muted'>月报 {html.escape(item.get('monthly_report_time') or '关闭')}</span></td>"
       f"<td><form method='post' action='/command'>"
       f"<input type='hidden' name='node_id' value='{html.escape(item['node_id'])}'>"
       "<select name='command'>"
-      "<option>/status</option><option>/use</option><option>/speed</option>"
+      "<option>/snapshot</option><option>/status</option><option>/use</option><option>/speed</option>"
       "<option>/disk</option><option>/top</option><option>/uptime</option>"
       "<option>/services</option>"
       "</select> <button>执行</button></form>"
@@ -1043,34 +1354,50 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       "<button name='action' value='online'>上线检查</button> "
       "<button name='action' value='refresh'>更新</button> "
       "<button name='action' value='offline'>下线</button> "
-      "<button name='action' value='delete'>删除</button></form></td>"
+      "<button class='danger' name='action' value='delete'>删除</button></form>"
+      "<details><summary>编辑</summary>"
+      f"<form method='post' action='/node-profile'><input type='hidden' name='node_id' value='{html.escape(item['node_id'])}'>"
+      "<div class='node-edit'>"
+      f"<label>名称<input name='name' value='{html.escape(item['name'])}' required></label>"
+      f"<label>分组<input name='group_name' value='{html.escape(item.get('group_name') or '')}'></label>"
+      f"<label>排序<input name='sort_order' value='{html.escape(str(item.get('sort_order') or 0))}' inputmode='numeric'></label>"
+      f"<label>总流量 GB<input name='traffic_total_gb' value='{html.escape(str(item.get('traffic_total_gb') or ''))}' inputmode='decimal'></label>"
+      f"<label>告警百分比<input name='traffic_alert_percent' value='{html.escape(str(item.get('traffic_alert_percent') or 80))}' inputmode='decimal'></label>"
+      f"<label>日报时间<input name='daily_report_time' value='{html.escape(item.get('daily_report_time') or '')}' placeholder='22:00:00'></label>"
+      f"<label>月报时间<input name='monthly_report_time' value='{html.escape(item.get('monthly_report_time') or '')}' placeholder='01 00:00:00'></label>"
+      "</div><button>保存节点</button></form></details></td>"
       "</tr>"
       for item in nodes
     ])
     online = sum(1 for item in nodes if item["status"] == "online")
     return self.page("VPS MQTT 面板", f"""
-<h1>VPS MQTT 面板</h1>
-<p class="muted">当前用户: {html.escape(user)}</p>
-<section>
-  <strong>在线 VPS:</strong> {online} / {len(nodes)}
-  <br><a href="/totp">绑定或更新 Google Authenticator</a>
-</section>
-<section>
+<div class="topbar">
+  <div>
+    <h1>VPS MQTT 面板</h1>
+    <p class="muted">当前用户: {html.escape(user)} · 在线 VPS {online} / {len(nodes)}</p>
+  </div>
+  <div class="toolbar">
+    <form class="inline" method="post" action="/theme">
+      <select name="theme">{theme_options}</select>
+      <button class="secondary">切换主题</button>
+    </form>
+    <a href="/monitor">展示页面</a>
+    <a href="/totp">Google Authenticator</a>
+  </div>
+</div>
+<section class="panel">
   <h2>Telegram</h2>
-  <form method="post" action="/telegram">
-    <label>Bot Token<br><input name="token" value="{html.escape(self.db.get_setting('telegram_token'))}"></label><br>
-    <label>Chat ID<br><input name="chat_id" value="{html.escape(self.db.get_setting('telegram_chat_id'))}"></label><br>
-    <label>当前登录密码<br><input name="current_password" type="password" required></label><br>
-    <button>保存</button>
-  </form>
+  {telegram_html}
 </section>
-<section>
-  <h2>已注册 VPS</h2>
-  <form method="post" action="/registration-command">
+<section class="panel">
+  <div class="topbar">
+    <h2>已注册 VPS</h2>
+    <form method="post" action="/registration-command" class="inline">
     <label>节点备注名<br><input name="name" placeholder="可留空"></label>
     <button>绑定 VPS</button>
-  </form>
-  <table><thead><tr><th>节点</th><th>状态</th><th>公网 IP</th><th>操作</th></tr></thead><tbody>{rows}</tbody></table>
+    </form>
+  </div>
+  <table><thead><tr><th>节点</th><th>状态</th><th>公网 IP</th><th>流量</th><th>汇报</th><th>操作</th></tr></thead><tbody>{rows}</tbody></table>
 </section>""")
 
   def render_totp(self, user):
@@ -1106,6 +1433,44 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     self.db.audit(user, "enable_totp", "enabled")
     self.redirect("/")
 
+  def render_monitor(self, user):
+    """Render the monitoring snapshot page."""
+    rows = "\n".join([
+      "<tr>"
+      f"<td><strong>{html.escape(item['name'])}</strong><br><span class='muted'>{html.escape(item.get('group_name') or '未分组')}</span></td>"
+      f"<td><span class='badge {'ok' if item['status'] == 'online' else ''}'>{html.escape(item['status'])}</span></td>"
+      f"<td>{float(item.get('monthly_used_gb') or 0):.2f} / {float(item.get('traffic_total_gb') or 0):.2f} GB<br>"
+      f"<span class='muted'>今日 {float(item.get('daily_used_gb') or 0):.2f} GB</span></td>"
+      f"<td>↓ {float(item.get('network_rx_mbps') or 0):.2f} Mbps<br>↑ {float(item.get('network_tx_mbps') or 0):.2f} Mbps</td>"
+      f"<td>{float(item.get('cpu_percent') or 0):.1f}%</td>"
+      f"<td>{float(item.get('memory_percent') or 0):.1f}%</td>"
+      f"<td>{float(item.get('latency_ms') or 0):.1f} ms</td>"
+      f"<td>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(item.get('snapshot_ts') or 0))) if item.get('snapshot_ts') else '暂无'}</td>"
+      "</tr>"
+      for item in self.db.latest_node_snapshots()
+      if item["status"] == "online"
+    ])
+    monitor_until = int(self.db.get_setting("monitor_until", "0") or "0")
+    state = "运行中" if monitor_until > int(time.time()) else "未运行"
+    return self.page("VPS 监控展示", f"""
+<div class="topbar">
+  <div>
+    <h1>VPS 监控展示</h1>
+    <p class="muted">动态监控: {state}</p>
+  </div>
+  <div class="toolbar">
+    <a href="/">返回面板</a>
+    <form class="inline" method="post" action="/snapshot"><button>获取快照</button></form>
+    <form class="inline" method="post" action="/dynamic-monitor">
+      <input name="minutes" inputmode="numeric" placeholder="分钟数" style="width: 100px">
+      <button>动态监控</button>
+    </form>
+  </div>
+</div>
+<section class="panel">
+  <table><thead><tr><th>节点</th><th>状态</th><th>流量</th><th>网速</th><th>CPU</th><th>内存</th><th>延迟</th><th>更新时间</th></tr></thead><tbody>{rows}</tbody></table>
+</section>""")
+
   def handle_telegram(self, user):
     """Save Telegram settings."""
     form = self.read_form()
@@ -1114,6 +1479,24 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
       self.send_html(self.page("Telegram 绑定失败", f"<p>{html.escape(message)}</p>"), status=400)
       return
     self.send_html(self.page("Telegram 绑定成功", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"))
+
+  def handle_telegram_delete(self, user):
+    """Delete Telegram settings."""
+    form = self.read_form()
+    ok, message = delete_telegram_settings(self.db, user, form.get("current_password", ""))
+    if not ok:
+      self.send_html(self.page("Telegram 删除失败", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"), status=400)
+      return
+    self.send_html(self.page("Telegram 已删除", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"))
+
+  def handle_theme(self, user):
+    """Save the selected theme."""
+    form = self.read_form()
+    if not save_theme(self.db, form.get("theme", "light")):
+      self.send_html(self.page("主题切换失败", "<p>不支持的主题。</p>"), status=400)
+      return
+    self.db.audit(user, "save_theme", form.get("theme", ""))
+    self.redirect("/")
 
   def handle_command(self, user):
     """Dispatch a whitelisted command."""
@@ -1143,6 +1526,43 @@ class MasterRequestHandler(http.server.BaseHTTPRequestHandler):
     message = handle_node_action(self.db, self.config, form.get("node_id", ""), form.get("action", ""))
     self.db.audit(user, "node_action", message)
     self.send_html(self.page("VPS 操作", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"))
+
+  def handle_node_profile(self, user):
+    """Save editable node profile fields."""
+    form = self.read_form()
+    ok, message = update_node_profile(self.db, form.get("node_id", ""), form)
+    if not ok:
+      self.send_html(self.page("节点保存失败", f"<p>{html.escape(message)}</p><p><a href='/'>返回面板</a></p>"), status=400)
+      return
+    self.db.audit(user, "node_profile", message)
+    self.redirect("/")
+
+  def handle_snapshot(self, user):
+    """Request a one-time monitoring snapshot."""
+    try:
+      message = request_snapshot(self.db, self.config, online_only=True)
+    except ValueError as error:
+      message = str(error)
+    self.db.audit(user, "request_snapshot", message)
+    self.send_html(self.page("获取快照", f"<p>{html.escape(message)}</p><p><a href='/monitor'>查看展示页面</a></p>"))
+
+  def handle_dynamic_monitor(self, user):
+    """Start a short-lived dynamic monitor loop."""
+    form = self.read_form()
+    try:
+      minutes = max(1, min(int(form.get("minutes", "1") or "1"), 120))
+    except ValueError:
+      minutes = 1
+    until = int(time.time()) + minutes * 60
+    self.db.set_setting("monitor_until", str(until))
+    thread = threading.Thread(
+      target=dynamic_monitor_loop,
+      args=(self.db, self.config, until),
+      daemon=True,
+    )
+    thread.start()
+    self.db.audit(user, "dynamic_monitor", f"{minutes} minutes")
+    self.redirect("/monitor")
 
   def handle_register_api(self):
     """Register an agent using a one-time token."""

@@ -299,6 +299,130 @@ class MqttSecurityTest(unittest.TestCase):
       self.assertIn("已删除", message)
       self.assertEqual([], db.list_nodes())
 
+  def test_theme_setting_accepts_supported_themes_only(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+
+      self.assertTrue(mqtt_master.save_theme(db, "dark"))
+      self.assertFalse(mqtt_master.save_theme(db, "pink"))
+
+      self.assertEqual("dark", db.get_setting("web_theme"))
+
+  def test_telegram_delete_requires_current_password(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.create_admin("admin", "pw")
+      db.set_setting("telegram_token", "123:abc")
+      db.set_setting("telegram_chat_id", "456")
+
+      ok, message = mqtt_master.delete_telegram_settings(db, "admin", "bad")
+
+      self.assertFalse(ok)
+      self.assertIn("登录密码错误", message)
+      self.assertEqual("123:abc", db.get_setting("telegram_token"))
+
+  def test_telegram_delete_clears_binding_after_password_check(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      db.create_admin("admin", "pw")
+      db.set_setting("telegram_token", "123:abc")
+      db.set_setting("telegram_chat_id", "456")
+
+      ok, message = mqtt_master.delete_telegram_settings(db, "admin", "pw")
+
+      self.assertTrue(ok)
+      self.assertIn("已删除", message)
+      self.assertEqual("", db.get_setting("telegram_token"))
+      self.assertEqual("", db.get_setting("telegram_chat_id"))
+
+  def test_node_profile_edit_persists_monitoring_fields(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+
+      ok, message = mqtt_master.update_node_profile(db, node["node_id"], {
+        "name": "台湾",
+        "group_name": "asia",
+        "sort_order": "7",
+        "traffic_total_gb": "500",
+        "traffic_alert_percent": "80",
+        "daily_report_time": "22:00:00",
+        "monthly_report_time": "01 00:00:00",
+      })
+
+      self.assertTrue(ok)
+      self.assertIn("已保存", message)
+      saved = db.list_nodes()[0]
+      self.assertEqual("台湾", saved["name"])
+      self.assertEqual("asia", saved["group_name"])
+      self.assertEqual(7, saved["sort_order"])
+      self.assertEqual(500.0, saved["traffic_total_gb"])
+      self.assertEqual(80.0, saved["traffic_alert_percent"])
+      self.assertEqual("22:00:00", saved["daily_report_time"])
+      self.assertEqual("01 00:00:00", saved["monthly_report_time"])
+
+  def test_store_command_result_persists_snapshot_metrics(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      node = db.register_node("test7")
+
+      db.store_command_result({
+        "id": "cmd-1",
+        "node_id": node["node_id"],
+        "name": "test7",
+        "command": "snapshot",
+        "ok": True,
+        "text": "ok",
+        "metrics": {
+          "monthly_used_gb": 12.5,
+          "daily_used_gb": 1.25,
+          "network_rx_mbps": 8.1,
+          "network_tx_mbps": 2.4,
+          "cpu_percent": 13.2,
+          "memory_percent": 44.1,
+          "latency_ms": 31.0,
+        },
+        "ts": 1800000000,
+      })
+
+      snapshot = db.latest_node_snapshots()[0]
+
+    self.assertEqual("test7", snapshot["name"])
+    self.assertEqual(12.5, snapshot["monthly_used_gb"])
+    self.assertEqual(1.25, snapshot["daily_used_gb"])
+    self.assertEqual(31.0, snapshot["latency_ms"])
+
+  def test_request_snapshot_dispatches_to_online_nodes_only(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
+      first = db.register_node("online")
+      second = db.register_node("offline")
+      db.update_node_status(first["node_id"], "online", "1.1.1.1")
+      db.update_node_status(second["node_id"], "offline", "2.2.2.2")
+
+      with mock.patch("mqtt_master.dispatch_command") as dispatch:
+        message = mqtt_master.request_snapshot(db, {}, online_only=True)
+
+    self.assertIn("1 台", message)
+    dispatch.assert_called_once_with(db, {}, first["node_id"], "/snapshot")
+
+  def test_agent_snapshot_command_returns_structured_metrics(self):
+    with mock.patch("mqtt_agent.collect_snapshot_metrics") as collect:
+      collect.return_value = {
+        "monthly_used_gb": 1.0,
+        "daily_used_gb": 0.2,
+        "network_rx_mbps": 5.0,
+        "network_tx_mbps": 1.0,
+        "cpu_percent": 9.0,
+        "memory_percent": 30.0,
+        "latency_ms": 20.0,
+      }
+
+      result = mqtt_agent.execute_allowed_command({"NODE_NAME": "test7"}, "/snapshot")
+
+    self.assertEqual("snapshot", result["command"])
+    self.assertEqual(1.0, result["metrics"]["monthly_used_gb"])
+
   def test_login_trims_username_and_sets_session_cookie(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db = mqtt_master.MasterDatabase(os.path.join(temp_dir, "master.db"))
