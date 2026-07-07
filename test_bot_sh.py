@@ -299,6 +299,23 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
 
     self.assertEqual("", self.run_bash(script))
 
+  def test_missing_dependencies_includes_mosquitto_clients(self):
+    script = textwrap.dedent("""
+      BOT_PANEL_TESTING=1 source ./bot.sh
+      command() {
+        if [ "$1" = "-v" ] && [ "$2" = "mosquitto_pub" ]; then
+          return 1
+        fi
+        if [ "$1" = "-v" ]; then
+          return 0
+        fi
+        builtin command "$@"
+      }
+      get_missing_dependencies
+    """)
+
+    self.assertIn("mosquitto-clients", self.run_bash(script))
+
   def test_main_choice_two_shows_node_info(self):
     script = textwrap.dedent("""
       BOT_PANEL_TESTING=1 source ./bot.sh
@@ -331,12 +348,17 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
       bind_telegram_bot
     """)
 
-    output = self.run_bash(script, stdin="token\nchat\nnode\nnode,vps2,vps3\nnode\n")
+    output = self.run_bash(script, stdin="token\nchat\nnode\nnode,vps2,vps3\nnode\nmqtt.local\n1883\nuser\npass\npanel\n")
 
     self.assertIn("Telegram 绑定成功。", output)
     self.assertIn("listener-started", output)
     self.assertIn("NODE_LIST=node,vps2,vps3", output)
     self.assertIn("CONTROL_NODE=node", output)
+    self.assertIn("MQTT_HOST=mqtt.local", output)
+    self.assertIn("MQTT_PORT=1883", output)
+    self.assertIn("MQTT_USERNAME=user", output)
+    self.assertIn("MQTT_PASSWORD=pass", output)
+    self.assertIn("MQTT_TOPIC_PREFIX=panel", output)
 
   def test_bind_telegram_can_leave_control_node_empty(self):
     script = textwrap.dedent("""
@@ -352,7 +374,7 @@ class BotShellInterfaceSelectionTest(unittest.TestCase):
       bind_telegram_bot
     """)
 
-    output = self.run_bash(script, stdin="token\nchat\nnode\nnode,vps2,vps3\n\n")
+    output = self.run_bash(script, stdin="token\nchat\nnode\nnode,vps2,vps3\n\n\n\n\n\n\n")
 
     self.assertIn("NODE_LIST=node,vps2,vps3", output)
     self.assertIn("CONTROL_NODE=\n", output)

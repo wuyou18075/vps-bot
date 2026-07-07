@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PANEL_NAME="${PANEL_NAME:-bot-panel}"
-SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.06.8}"
+SCRIPT_VERSION="${BOT_PANEL_SCRIPT_VERSION:-2026.07.07.1}"
 SCRIPT_VERSION_STATUS_CACHE=""
 RAW_BASE_URL="${BOT_PANEL_RAW_BASE_URL:-https://raw.githubusercontent.com/wuyou18075/vps-bot/refs/heads/main}"
 AGENT_URL="${BOT_PANEL_AGENT_URL:-${RAW_BASE_URL}/bot_agent.py}"
@@ -349,6 +349,7 @@ get_missing_dependencies() {
     "python3:python3"
     "iputils-ping:ping"
     "speedtest-cli:speedtest-cli"
+    "mosquitto-clients:mosquitto_pub"
   )
   local spec
   local package
@@ -505,12 +506,35 @@ bind_telegram_bot() {
   node_list="${node_list:-${NODE_LIST:-${node_name}}}"
   read -r -p "请输入控制节点名（只在一台 VPS 上填写，其他机器留空） [${CONTROL_NODE:-留空}]: " control_node
   control_node="${control_node:-${CONTROL_NODE:-}}"
+  read -r -p "请输入 MQTT 服务地址（留空则使用旧的 TG 直连模式） [${MQTT_HOST:-留空}]: " mqtt_host
+  mqtt_host="${mqtt_host:-${MQTT_HOST:-}}"
+
+  if [ -n "${mqtt_host}" ]; then
+    read -r -p "请输入 MQTT 端口 [${MQTT_PORT:-1883}]: " mqtt_port
+    mqtt_port="${mqtt_port:-${MQTT_PORT:-1883}}"
+    read -r -p "请输入 MQTT 用户名（无认证可留空） [${MQTT_USERNAME:-留空}]: " mqtt_username
+    mqtt_username="${mqtt_username:-${MQTT_USERNAME:-}}"
+    read -r -p "请输入 MQTT 密码（无认证可留空） [${MQTT_PASSWORD:+已配置}]: " mqtt_password
+    mqtt_password="${mqtt_password:-${MQTT_PASSWORD:-}}"
+    read -r -p "请输入 MQTT 主题前缀 [${MQTT_TOPIC_PREFIX:-vps-bot}]: " mqtt_topic_prefix
+    mqtt_topic_prefix="${mqtt_topic_prefix:-${MQTT_TOPIC_PREFIX:-vps-bot}}"
+  else
+    mqtt_port=""
+    mqtt_username=""
+    mqtt_password=""
+    mqtt_topic_prefix=""
+  fi
 
   write_config_value "BOT_TOKEN" "${bot_token}"
   write_config_value "CHAT_ID" "${chat_id}"
   write_config_value "NODE_NAME" "${node_name}"
   write_config_value "NODE_LIST" "${node_list}"
   write_config_value "CONTROL_NODE" "${control_node}"
+  write_config_value "MQTT_HOST" "${mqtt_host}"
+  write_config_value "MQTT_PORT" "${mqtt_port}"
+  write_config_value "MQTT_USERNAME" "${mqtt_username}"
+  write_config_value "MQTT_PASSWORD" "${mqtt_password}"
+  write_config_value "MQTT_TOPIC_PREFIX" "${mqtt_topic_prefix}"
 
   if python3 "${AGENT_FILE}" --send-test; then
     green "Telegram 绑定成功。"
@@ -610,6 +634,8 @@ show_node_info() {
 流量监控: ${TRAFFIC_MONITOR:-0}
 Telegram Bot: $([ -n "${BOT_TOKEN:-}" ] && echo "已配置" || echo "未配置")
 Chat ID: ${CHAT_ID:-未设置}
+MQTT: $([ -n "${MQTT_HOST:-}" ] && echo "${MQTT_HOST}:${MQTT_PORT:-1883}" || echo "未启用")
+MQTT主题: ${MQTT_TOPIC_PREFIX:-vps-bot}
 监听服务: $(systemctl is-active "${PANEL_NAME}-listener.service" 2>/dev/null || true)
 EOF
   pause

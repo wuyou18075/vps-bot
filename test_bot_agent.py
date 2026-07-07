@@ -69,7 +69,8 @@ class TelegramCommandTest(unittest.TestCase):
     bot_agent.STATE_DIR = "/tmp"
     bot_agent.PENDING_SELECT_FILE = "/tmp/bot-panel-test-pending-select"
     bot_agent.SELECTED_NODES_FILE = "/tmp/bot-panel-test-selected-nodes"
-    for path in [bot_agent.PENDING_SELECT_FILE, bot_agent.SELECTED_NODES_FILE]:
+    bot_agent.MQTT_NODES_FILE = "/tmp/bot-panel-test-mqtt-nodes.json"
+    for path in [bot_agent.PENDING_SELECT_FILE, bot_agent.SELECTED_NODES_FILE, bot_agent.MQTT_NODES_FILE]:
       try:
         os.remove(path)
       except FileNotFoundError:
@@ -202,6 +203,75 @@ class TelegramCommandTest(unittest.TestCase):
 
     methods = [call.args[1] for call in telegram_api.call_args_list]
     self.assertEqual(["deleteWebhook", "setMyCommands"], methods)
+
+
+class MqttCommandTest(unittest.TestCase):
+  def setUp(self):
+    bot_agent.STATE_DIR = "/tmp"
+    bot_agent.SELECTED_NODES_FILE = "/tmp/bot-panel-test-selected-nodes"
+    bot_agent.MQTT_NODES_FILE = "/tmp/bot-panel-test-mqtt-nodes.json"
+    for path in [bot_agent.SELECTED_NODES_FILE, bot_agent.MQTT_NODES_FILE]:
+      try:
+        os.remove(path)
+      except FileNotFoundError:
+        pass
+
+  def test_mqtt_is_enabled_by_host(self):
+    self.assertTrue(bot_agent.mqtt_enabled({"MQTT_HOST": "mqtt.example.com"}))
+    self.assertFalse(bot_agent.mqtt_enabled({}))
+
+  def test_mqtt_topic_uses_prefix(self):
+    topic = bot_agent.mqtt_topic({"MQTT_TOPIC_PREFIX": "panel"}, "commands/test7")
+
+    self.assertEqual("panel/commands/test7", topic)
+
+  def test_control_command_publishes_to_selected_nodes(self):
+    bot_agent.write_selected_nodes(["test7", "台湾"])
+    config = {
+      "NODE_NAME": "台湾",
+      "CONTROL_NODE": "台湾",
+      "MQTT_HOST": "mqtt.example.com",
+      "MQTT_TOPIC_PREFIX": "panel",
+    }
+
+    with mock.patch("bot_agent.mqtt_publish_json") as publish_json:
+      result = bot_agent.handle_mqtt_control_command(config, "/use")
+
+    topics = [call.args[1] for call in publish_json.call_args_list]
+    self.assertEqual("已发送 /use 到: test7,台湾", result)
+    self.assertIn("panel/commands/test7", topics)
+    self.assertIn("panel/commands/台湾", topics)
+
+  def test_mqtt_command_payload_executes_local_command(self):
+    payload = json.dumps({
+      "id": "cmd-1",
+      "command": "/use",
+    })
+    config = {"NODE_NAME": "test7"}
+
+    with mock.patch("bot_agent.get_traffic_usage", return_value="本月已用: 1.00 GB"):
+      result = bot_agent.handle_mqtt_command_payload(config, payload)
+
+    self.assertEqual("cmd-1", result["id"])
+    self.assertEqual("test7", result["node"])
+    self.assertIn("[test7] 流量使用情况", result["text"])
+
+  def test_node_status_updates_registry(self):
+    path = "/tmp/bot-panel-test-mqtt-nodes.json"
+    bot_agent.MQTT_NODES_FILE = path
+    try:
+      os.remove(path)
+    except FileNotFoundError:
+      pass
+
+    bot_agent.update_mqtt_node_registry(json.dumps({
+      "node": "台湾",
+      "status": "online",
+      "ip": "1.2.3.4",
+    }))
+
+    nodes = bot_agent.read_mqtt_nodes()
+    self.assertEqual(["台湾"], nodes)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -20,6 +21,13 @@ STATE_DIR = os.environ.get("BOT_PANEL_STATE_DIR", "/var/lib/bot-panel")
 LAST_UPDATE_FILE = os.path.join(STATE_DIR, "last_update_id")
 PENDING_SELECT_FILE = os.path.join(STATE_DIR, "pending_select")
 SELECTED_NODES_FILE = os.path.join(STATE_DIR, "selected_nodes")
+MQTT_NODES_FILE = os.path.join(STATE_DIR, "mqtt_nodes.json")
+
+
+SELECTED_COMMANDS = [
+  "ping", "speed", "sudu", "use", "status", "report",
+  "disk", "top", "uptime", "services",
+]
 
 
 def load_config(path=CONFIG_FILE):
@@ -98,6 +106,9 @@ def write_last_update_id(update_id):
 
 def parse_node_list(config):
   """Return configured VPS node names."""
+  mqtt_nodes = read_mqtt_nodes()
+  if mqtt_nodes:
+    return mqtt_nodes
   raw_nodes = config.get("NODE_LIST") or config.get("NODE_NAME") or socket.gethostname()
   nodes = []
   for item in re.split(r"[,，\s]+", raw_nodes):
@@ -170,6 +181,220 @@ def command_in_selected_scope(config):
     return True
   node_name = config.get("NODE_NAME") or socket.gethostname()
   return node_name in selected
+
+
+def mqtt_enabled(config):
+  """Return whether MQTT mode is configured."""
+  return bool((config.get("MQTT_HOST") or "").strip())
+
+
+def mqtt_topic(config, suffix):
+  """Build an MQTT topic from the configured prefix."""
+  prefix = (config.get("MQTT_TOPIC_PREFIX") or "vps-bot").strip().strip("/")
+  return f"{prefix}/{suffix.strip('/')}"
+
+
+def mqtt_base_args(config):
+  """Return common mosquitto command arguments."""
+  args = [
+    "-h", config.get("MQTT_HOST", ""),
+    "-p", str(config.get("MQTT_PORT") or "1883"),
+  ]
+  username = config.get("MQTT_USERNAME") or ""
+  password = config.get("MQTT_PASSWORD") or ""
+  if username:
+    args.extend(["-u", username])
+  if password:
+    args.extend(["-P", password])
+  return args
+
+
+def mqtt_publish(config, topic, payload, retain=False):
+  """Publish a JSON/text payload with mosquitto_pub."""
+  command = ["mosquitto_pub", *mqtt_base_args(config), "-t", topic, "-m", payload]
+  if retain:
+    command.append("-r")
+  code, _, error = run_command(command, timeout=20)
+  if code != 0:
+    log(f"MQTT 发布失败: topic={topic} error={error}")
+  return code == 0
+
+
+def mqtt_publish_json(config, topic, payload, retain=False):
+  """Publish JSON payload to MQTT."""
+  return mqtt_publish(config, topic, json.dumps(payload, ensure_ascii=False), retain=retain)
+
+
+def read_mqtt_nodes():
+  """Read recently known MQTT nodes."""
+  try:
+    with open(MQTT_NODES_FILE, "r", encoding="utf-8") as file:
+      data = json.load(file)
+  except (FileNotFoundError, json.JSONDecodeError):
+    return []
+  nodes = []
+  for node, info in data.items():
+    if info.get("status") == "online":
+      nodes.append(node)
+  return sorted(nodes)
+
+
+def update_mqtt_node_registry(payload):
+  """Persist MQTT node status published by agents."""
+  try:
+    message = json.loads(payload)
+  except json.JSONDecodeError:
+    return
+  node = (message.get("node") or "").strip()
+  if not node:
+    return
+
+  try:
+    with open(MQTT_NODES_FILE, "r", encoding="utf-8") as file:
+      data = json.load(file)
+  except (FileNotFoundError, json.JSONDecodeError):
+    data = {}
+
+  data[node] = {
+    "status": message.get("status") or "online",
+    "ip": message.get("ip") or "",
+    "ts": int(time.time()),
+  }
+  ensure_state_dir()
+  with open(MQTT_NODES_FILE, "w", encoding="utf-8") as file:
+    json.dump(data, file, ensure_ascii=False)
+
+
+def mqtt_selected_nodes(config):
+  """Return selected nodes for MQTT command fan-out."""
+  selected = read_selected_nodes()
+  if selected and selected != ["all"]:
+    return selected
+  return parse_node_list(config)
+
+
+def handle_mqtt_control_command(config, text):
+  """Publish a selected-scope Telegram command to MQTT targets."""
+  parsed = parse_command(text)
+  if not parsed or parsed["command"] not in SELECTED_COMMANDS:
+    return None
+  if not mqtt_enabled(config) or not is_control_node(config):
+    return None
+
+  nodes = mqtt_selected_nodes(config)
+  if not nodes:
+    return "没有可用 VPS 节点，请等待节点上线或检查 MQTT 配置。"
+
+  command_id = f"{int(time.time() * 1000)}-{os.getpid()}"
+  payload = {
+    "id": command_id,
+    "command": text,
+    "ts": int(time.time()),
+  }
+  for node in nodes:
+    mqtt_publish_json(config, mqtt_topic(config, f"commands/{node}"), payload)
+  return f"已发送 {text} 到: {','.join(nodes)}"
+
+
+def handle_mqtt_command_payload(config, payload):
+  """Execute a command payload received from MQTT and return result payload."""
+  try:
+    message = json.loads(payload)
+  except json.JSONDecodeError:
+    return None
+  command_text = message.get("command") or ""
+  response = handle_command(config, command_text, from_mqtt=True)
+  if not response:
+    return None
+  return {
+    "id": message.get("id"),
+    "node": config.get("NODE_NAME") or socket.gethostname(),
+    "ok": True,
+    "text": response,
+    "ts": int(time.time()),
+  }
+
+
+def mqtt_subscribe_process(config, topics):
+  """Start mosquitto_sub for the given topics."""
+  command = ["mosquitto_sub", *mqtt_base_args(config), "-v"]
+  for topic in topics:
+    command.extend(["-t", topic])
+  return subprocess.Popen(
+    command,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+  )
+
+
+def iter_mqtt_messages(process):
+  """Yield topic and payload pairs from mosquitto_sub -v output."""
+  if process.stdout is None:
+    return
+  for line in process.stdout:
+    raw = line.rstrip("\n")
+    if " " not in raw:
+      continue
+    topic, payload = raw.split(" ", 1)
+    yield topic, payload
+
+
+def publish_mqtt_node_status(config):
+  """Publish this node's retained online status."""
+  node_name = config.get("NODE_NAME") or socket.gethostname()
+  payload = {
+    "node": node_name,
+    "status": "online",
+    "ip": get_public_ip(),
+    "ts": int(time.time()),
+  }
+  mqtt_publish_json(config, mqtt_topic(config, f"nodes/{node_name}/status"), payload, retain=True)
+
+
+def mqtt_command_worker(config):
+  """Subscribe to MQTT commands for this node and publish command results."""
+  node_name = config.get("NODE_NAME") or socket.gethostname()
+  topics = [
+    mqtt_topic(config, f"commands/{node_name}"),
+    mqtt_topic(config, "commands/all"),
+  ]
+  while True:
+    try:
+      process = mqtt_subscribe_process(config, topics)
+      for _, payload in iter_mqtt_messages(process):
+        result = handle_mqtt_command_payload(config, payload)
+        if result:
+          mqtt_publish_json(config, mqtt_topic(config, f"results/{node_name}"), result)
+    except Exception as error:
+      log(f"MQTT 命令监听异常: {error}")
+      time.sleep(5)
+
+
+def mqtt_control_worker(config):
+  """Subscribe to MQTT node status and command results for the control node."""
+  topics = [
+    mqtt_topic(config, "nodes/+/status"),
+    mqtt_topic(config, "results/#"),
+  ]
+  while True:
+    try:
+      process = mqtt_subscribe_process(config, topics)
+      for topic, payload in iter_mqtt_messages(process):
+        if "/nodes/" in topic and topic.endswith("/status"):
+          update_mqtt_node_registry(payload)
+          continue
+        if "/results/" in topic:
+          try:
+            result = json.loads(payload)
+          except json.JSONDecodeError:
+            continue
+          text = result.get("text")
+          if text:
+            send_message(config, text)
+    except Exception as error:
+      log(f"MQTT 控制监听异常: {error}")
+      time.sleep(5)
 
 
 def telegram_api(config, method, data=None, timeout=30):
@@ -554,7 +779,7 @@ def handle_text(config, text):
   return None
 
 
-def handle_command(config, text):
+def handle_command(config, text, from_mqtt=False):
   """Execute a supported Telegram command and return a response."""
   parsed = parse_command(text)
   if not parsed:
@@ -563,10 +788,7 @@ def handle_command(config, text):
   node_name = config.get("NODE_NAME") or socket.gethostname()
   command = parsed["command"]
   args = parsed["args"]
-  selected_commands = [
-    "ping", "speed", "sudu", "use", "status", "report",
-    "disk", "top", "uptime", "services",
-  ]
+  selected_commands = SELECTED_COMMANDS
 
   if command == "select":
     if is_control_node(config):
@@ -574,7 +796,7 @@ def handle_command(config, text):
     write_pending_select(True)
     return None
 
-  if command in selected_commands and not command_in_selected_scope(config):
+  if not from_mqtt and command in selected_commands and not command_in_selected_scope(config):
     return None
 
   if command == "ping" and parsed["target"] and parsed["target"] not in ["all", "*", node_name]:
@@ -640,10 +862,22 @@ def listen(config):
   if not expected_chat_id:
     raise RuntimeError("CHAT_ID 未配置")
 
-  initialize_last_update(config)
   node_name = config.get("NODE_NAME") or socket.gethostname()
+  if mqtt_enabled(config):
+    publish_mqtt_node_status(config)
+    threading.Thread(target=mqtt_command_worker, args=(config,), daemon=True).start()
+    if not is_control_node(config):
+      log(f"[{node_name}] MQTT 节点监听已启动，非控制节点不轮询 Telegram")
+      while True:
+        time.sleep(3600)
+    threading.Thread(target=mqtt_control_worker, args=(config,), daemon=True).start()
+
+  initialize_last_update(config)
   prepare_listener(config)
-  send_message(config, f"[{node_name}] 指令监听已启动")
+  if mqtt_enabled(config):
+    send_message(config, f"[{node_name}] MQTT 控制监听已启动")
+  else:
+    send_message(config, f"[{node_name}] 指令监听已启动")
 
   while True:
     try:
@@ -662,7 +896,12 @@ def listen(config):
         if str(chat.get("id")) != expected_chat_id:
           log(f"忽略消息: chat_id={chat.get('id')} 与配置 CHAT_ID={expected_chat_id} 不一致")
           continue
-        response = handle_command(config, text) if text.startswith("/") else handle_text(config, text)
+        if mqtt_enabled(config) and text.startswith("/"):
+          response = handle_mqtt_control_command(config, text)
+          if response is None:
+            response = handle_command(config, text)
+        else:
+          response = handle_command(config, text) if text.startswith("/") else handle_text(config, text)
         if response:
           send_message(config, response)
         else:
